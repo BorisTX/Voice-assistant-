@@ -1,0 +1,9 @@
+{
+  "name": "hvac-voice-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
