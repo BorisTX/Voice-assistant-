@@ -1,12 +1,16 @@
 import express from "express";
 
+const app = express();
+
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+
+// Health check
 app.get("/", (req, res) => {
   res.send("Voice assistant is running 🚀");
 });
 
-const app = express();
-app.use(express.urlencoded({ extended: false }));
-
+// Twilio voice webhook
 app.post("/voice", (req, res) => {
   const twiml = `
     <Response>
@@ -15,11 +19,12 @@ app.post("/voice", (req, res) => {
       </Say>
     </Response>
   `;
+
   res.type("text/xml");
   res.send(twiml);
 });
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT;
 app.listen(port, () => {
   console.log("Server running on port " + port);
 });
