@@ -1,5 +1,9 @@
 import express from "express";
 
+app.get("/", (req, res) => {
+  res.send("Voice assistant is running 🚀");
+});
+
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
