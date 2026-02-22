@@ -37,7 +37,7 @@ wss.on("connection", (twilioWs) => {
     "wss://api.openai.com/v1/realtime?model=gpt-realtime",
     {
       headers: {
-        Authorization: Bearer ${process.env.OPENAI_API_KEY},
+        Authorization: 'Bearer ${process.env.OPENAI_API_KEY}',
       },
     }
   );
