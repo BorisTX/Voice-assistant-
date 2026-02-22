@@ -10,9 +10,8 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 
 // Twilio Voice webhook -> TwiML that starts bidirectional media stream
 app.post("/voice", (req, res) => {
-  // IMPORTANT: wss URL must match your Render service domain
-  const host = req.get("host"); // e.g. voice-assistant-xxxx.onrender.com
-  const streamUrl = "wss://voice-assistant-7yq5.onrender.com/media";
+  const host = req.get("host");
+  const streamUrl = wss://${host}/media;
 
   const twiml = `
 <Response>
@@ -23,7 +22,6 @@ app.post("/voice", (req, res) => {
     <Stream url="${streamUrl}" />
   </Connect>
 </Response>`;
-
   res.type("text/xml").send(twiml);
 });
 
