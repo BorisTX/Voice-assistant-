@@ -54,20 +54,16 @@ wss.on("connection", (twilioWs) => {
     console.log("Connected to OpenAI");
 
     // ✅ Correct session.update shape (Realtime GA)
-    openaiWs.send(
-  JSON.stringify({
-    type: "session.update",
-    session: {
-      type: "realtime",
-      voice: "alloy",
-      instructions:
-        "You are a friendly HVAC assistant in Dallas-Fort Worth. " +
-        "Ask briefly for name, phone, address, issue, and preferred time. " +
-        "If emergency (no AC, no heat, gas smell, water leak), prioritize immediately. " +
-        "Keep responses short and natural."
-    },
-  })
-);
+    openaiWs.send(JSON.stringify({
+  type: "session.update",
+  session: {
+    instructions:
+      "You are a friendly HVAC assistant in Dallas-Fort Worth. " +
+      "Ask briefly for name, phone, address, issue, and preferred time. " +
+      "If emergency (no AC, no heat, gas smell, water leak), prioritize immediately. " +
+      "Keep responses short and natural."
+  }
+}));
 
     // Make assistant speak first
     openaiWs.send(
