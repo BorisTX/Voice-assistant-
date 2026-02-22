@@ -55,23 +55,20 @@ wss.on("connection", (twilioWs) => {
 
     // ✅ Correct session.update shape (Realtime GA)
     openaiWs.send(
-      JSON.stringify({
-        type: "session.update",
-        session: {
-          type: "realtime",
-          instructions:
-            "You are a friendly HVAC scheduling assistant in Dallas–Fort Worth. " +
-            "Keep answers short and natural. " +
-            "Collect: name, phone, address, problem, preferred time window. " +
-            "If emergency (no AC in extreme heat, no heat in cold, gas smell, water leak), prioritize and advise safety steps.",
-          modalities: ["audio"],
-          audio: {
-            input: { format: "g711_ulaw" },
-            output: { format: "g711_ulaw", voice: "alloy" },
-          },
-        },
-      })
-    );
+  JSON.stringify({
+    type: "session.update",
+    session: {
+      instructions:
+        "You are a friendly HVAC assistant in Dallas-Fort Worth. " +
+        "Ask briefly for name, phone, address, issue, and preferred time. " +
+        "If emergency (no AC, no heat, gas smell, water leak), prioritize immediately. " +
+        "Keep responses short and natural.",
+      input_audio_format: "g711_ulaw",
+      output_audio_format: "g711_ulaw",
+      voice: "alloy",
+    },
+  })
+);
 
     // Make assistant speak first
     openaiWs.send(
