@@ -11,7 +11,7 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 // Twilio Voice webhook -> TwiML that starts bidirectional media stream
 app.post("/voice", (req, res) => {
   const host = req.get("host");
-  const streamUrl = wss://${host}/media;
+  const streamUrl = 'wss://${host}/media';
 
   const twiml = `
 <Response>
@@ -37,7 +37,7 @@ wss.on("connection", (twilioWs) => {
   // Connect to OpenAI Realtime over WebSocket
   const openaiWs = new WebSocket("wss://api.openai.com/v1/realtime?model=gpt-realtime", {
     headers: {
-      Authorization: Bearer ${process.env.OPENAI_API_KEY},
+      Authorization: 'Bearer ${process.env.OPENAI_API_KEY}',
     },
   });
 
