@@ -42,26 +42,22 @@ wss.on("connection", (twilioWs) => {
 });
 
   openaiWs.on("open", () => {
-    // Configure the Realtime session.
-    // We use G.711 μ-law (pcmu) so we can pass audio directly to/from Twilio without transcoding.  [oai_citation:4‡OpenAI Developers](https://developers.openai.com/api/reference/resources/realtime/)
-    openaiWs.send(
-      JSON.stringify({
-        type: "session.update",
-        session: {
-          type: "realtime",
-          model: "gpt-realtime",
-          instructions:
-            "You are a helpful, natural-sounding voice assistant for a local HVAC company in Dallas–Fort Worth. " +
-            "Goal: handle new service calls, detect emergencies, collect name, address, phone, problem, and preferred time. " +
-            "Do NOT quote prices or guarantee times. If caller wants a human, offer to connect them. Keep replies short.",
-          audio: {
-            input: { format: { type: "audio/pcmu" } },
-            output: { format: { type: "audio/pcmu" }, voice: "marin" },
-          },
-        },
-      })
-    );
-  });
+  const msg = {
+    type: "session.update",
+    session: {
+      instructions:
+        "You are a helpful, natural-sounding voice assistant for a local HVAC company in Dallas–Fort Worth. " +
+        "Your job is to collect: name, phone, service address, issue, and preferred time. " +
+        "Detect emergencies (no AC, no heat, gas smell, burning smell, water leak) and tell the caller you will prioritize them. " +
+        "Do not quote prices or guarantees. Keep replies short.",
+      input_audio_format: "pcm_mulaw",
+      output_audio_format: "pcm_mulaw",
+      voice: "alloy"
+    }
+  };
+
+  openaiWs.send(JSON.stringify(msg));
+});
 
   // Receive events from OpenAI and forward audio back to Twilio
   openaiWs.on("message", (data) => {
