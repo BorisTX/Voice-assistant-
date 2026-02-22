@@ -5,51 +5,59 @@ import WebSocket, { WebSocketServer } from "ws";
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
+// Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
 
+// Twilio webhook → returns TwiML with Media Stream
 app.post("/voice", (req, res) => {
-  const host = req.get("host");
-  const streamUrl = wss://${host}/media;
+  const host = req.headers.host;
 
   const twiml = `
-<Response>
-  <Say voice="Polly.Joanna">
-    Thanks for calling. This is the HVAC scheduling assistant. One moment.
-  </Say>
-  <Connect>
-    <Stream url="${streamUrl}" />
-  </Connect>
-</Response>`;
+    <Response>
+      <Connect>
+        <Stream url="wss://${host}/media" />
+      </Connect>
+    </Response>
+  `;
 
-  res.type("text/xml").send(twiml);
+  res.type("text/xml");
+  res.send(twiml);
 });
 
 const server = http.createServer(app);
+
+// WebSocket endpoint for Twilio
 const wss = new WebSocketServer({ server, path: "/media" });
 
 wss.on("connection", (twilioWs) => {
+  console.log("Twilio connected");
+
   let streamSid = null;
 
+  // Connect to OpenAI Realtime
   const openaiWs = new WebSocket(
     "wss://api.openai.com/v1/realtime?model=gpt-realtime",
     {
       headers: {
-        Authorization: Bearer ${process.env.OPENAI_API_KEY},
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
     }
   );
 
+  // When OpenAI socket opens
   openaiWs.on("open", () => {
-    // Minimal, valid session config (mulaw passthrough)
+    console.log("Connected to OpenAI");
+
+    // Configure session
     openaiWs.send(
       JSON.stringify({
         type: "session.update",
         session: {
           instructions:
-            "You are a friendly HVAC scheduling assistant in Dallas–Fort Worth. " +
-            "Ask short questions to collect: name, phone, address, issue, preferred time. " +
-            "If emergency (no AC/no heat/gas smell/burning smell/water leak), say you will prioritize and offer to connect to a tech. " +
-            "Do not quote prices. Keep it brief.",
+            "You are a friendly HVAC assistant in Dallas-Fort Worth. " +
+            "Ask briefly for name, phone, address, issue, and preferred time. " +
+            "If emergency (no AC, no heat, gas smell, water leak), prioritize immediately. " +
+            "Keep responses short and natural.",
           input_audio_format: "pcm_mulaw",
           output_audio_format: "pcm_mulaw",
           voice: "alloy",
@@ -57,30 +65,25 @@ wss.on("connection", (twilioWs) => {
       })
     );
 
-    // Make the assistant speak first (quick sanity check)
+    // Make assistant speak first
     openaiWs.send(
       JSON.stringify({
         type: "response.create",
         response: {
           output_modalities: ["audio"],
           instructions:
-            "Say: 'Hi! This is the HVAC assistant. Is this an emergency, or do you want to schedule service?'",
+            "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?",
         },
       })
     );
   });
 
-  // Twilio -> OpenAI
-  twilioWs.on("message", (data) => {
-    let msg;
-    try {
-      msg = JSON.parse(data.toString());
-    } catch {
-      return;
-    }
+  // Twilio → OpenAI
+  twilioWs.on("message", (message) => {
+    const msg = JSON.parse(message);
 
     if (msg.event === "start") {
-      streamSid = msg.streamSid;
+      streamSid = msg.start.streamSid;
       return;
     }
 
@@ -97,22 +100,24 @@ wss.on("connection", (twilioWs) => {
     }
 
     if (msg.event === "stop") {
-      try {
-        openaiWs.close();
-      } catch {}
+      if (openaiWs.readyState === WebSocket.OPEN) {
+        openaiWs.send(
+          JSON.stringify({ type: "input_audio_buffer.commit" })
+        );
+
+        openaiWs.send(
+          JSON.stringify({ type: "response.create" })
+        );
+      }
     }
   });
 
-  // OpenAI -> Twilio
+  // OpenAI → Twilio
   openaiWs.on("message", (data) => {
-    let msg;
-    try {
-      msg = JSON.parse(data.toString());
-    } catch {
-      return;
-    }
+    const msg = JSON.parse(data);
 
-    if (msg.type === "response.output_audio.delta" && msg.delta && streamSid) {
+    // Stream audio chunks back to Twilio
+    if (msg.type === "response.output_audio.delta" && msg.delta) {
       twilioWs.send(
         JSON.stringify({
           event: "media",
@@ -123,19 +128,22 @@ wss.on("connection", (twilioWs) => {
     }
   });
 
-  const cleanup = () => {
-    try {
-      openaiWs.close();
-    } catch {}
-    try {
-      twilioWs.close();
-    } catch {}
-  };
+  // Cleanup
+  twilioWs.on("close", () => {
+    console.log("Twilio disconnected");
+    openaiWs.close();
+  });
 
-  twilioWs.on("close", cleanup);
-  openaiWs.on("close", cleanup);
-  openaiWs.on("error", (e) => console.error("OpenAI WS error:", e));
+  openaiWs.on("close", () => {
+    console.log("OpenAI disconnected");
+  });
+
+  openaiWs.on("error", (err) => {
+    console.error("OpenAI error:", err);
+  });
 });
 
 const port = process.env.PORT || 3000;
-server.listen(port, () => console.log("Server listening on", port));
+server.listen(port, () => {
+  console.log("Voice assistant is running 🚀 on port", port);
+});
