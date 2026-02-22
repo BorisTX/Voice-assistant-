@@ -22,6 +22,7 @@ app.post("/voice", (req, res) => {
     <Stream url="${streamUrl}" />
   </Connect>
 </Response>`;
+
   res.type("text/xml").send(twiml);
 });
 
