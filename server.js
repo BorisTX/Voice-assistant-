@@ -54,8 +54,7 @@ wss.on("connection", (twilioWs) => {
     console.log("Connected to OpenAI");
 
     // ✅ Correct session.update shape (Realtime GA)
-    openaiWs.send(
-  JSON.stringify({
+    openaiWs.send(JSON.stringify({
     type: "session.update",
     session: {
       instructions:
