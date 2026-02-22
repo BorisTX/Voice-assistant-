@@ -14,10 +14,12 @@ app.post("/voice", (req, res) => {
 
   const twiml = `
 <Response>
+  <Say>Thanks for calling. Please hold for a moment.</Say>
   <Connect>
     <Stream url="wss://${host}/media" />
   </Connect>
-</Response>`;
+</Response>
+  `.trim();
 
   res.type("text/xml").send(twiml);
 });
@@ -32,68 +34,84 @@ wss.on("connection", (twilioWs) => {
 
   let streamSid = null;
 
-  // Connect to OpenAI Realtime
-  const openaiWs = new WebSocket(
-    "wss://api.openai.com/v1/realtime?model=gpt-realtime",
-    {
-      headers: {
-        Authorization: 'Bearer ${process.env.OPENAI_API_KEY}',
-      },
-    }
-  );
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    console.error("OPENAI_API_KEY is missing in environment variables!");
+    try { twilioWs.close(); } catch {}
+    return;
+  }
 
-  // When OpenAI socket opens
+  // Connect to OpenAI Realtime (GA interface)
+  const openaiWs = new WebSocket("wss://api.openai.com/v1/realtime?model=gpt-realtime", {
+    headers: {
+      Authorization: Bearer ${apiKey},
+      // Если вдруг у тебя аккаунт/проект ещё на beta-поведении — раскомментируй строку ниже:
+      // "OpenAI-Beta": "realtime=v1",
+    },
+  });
+
   openaiWs.on("open", () => {
     console.log("Connected to OpenAI");
 
-    // Configure session
+    // ✅ Correct session.update shape (Realtime GA)
     openaiWs.send(
       JSON.stringify({
         type: "session.update",
         session: {
+          type: "realtime",
           instructions:
-            "You are a friendly HVAC assistant in Dallas-Fort Worth. " +
-            "Ask briefly for name, phone, address, issue, and preferred time. " +
-            "If emergency (no AC, no heat, gas smell, water leak), prioritize immediately. " +
-            "Keep responses short and natural.",
-          input_audio_format: "pcm_mulaw",
-          output_audio_format: "pcm_mulaw",
-          voice: "alloy",
+            "You are a friendly HVAC scheduling assistant in Dallas–Fort Worth. " +
+            "Keep answers short and natural. " +
+            "Collect: name, phone, address, problem, preferred time window. " +
+            "If emergency (no AC in extreme heat, no heat in cold, gas smell, water leak), prioritize and advise safety steps.",
+          modalities: ["audio"],
+          audio: {
+            input: { format: "g711_ulaw" },
+            output: { format: "g711_ulaw", voice: "alloy" },
+          },
         },
       })
     );
 
-    // Make assistant speak first (debug sanity check)
+    // Make assistant speak first
     openaiWs.send(
       JSON.stringify({
         type: "response.create",
         response: {
           output_modalities: ["audio"],
           instructions:
-            "Say: Hi! This is the HVAC assistant. Is this an emergency, or would you like to schedule service?",
+            "Say: Hi! This is the HVAC scheduling assistant. Is this an emergency, or would you like to schedule service?",
         },
       })
     );
   });
 
+  // Helpful debug logs
+  openaiWs.on("close", (code, reason) => {
+    console.log("OpenAI disconnected", { code, reason: reason?.toString() });
+  });
+
+  openaiWs.on("error", (err) => {
+    console.error("OpenAI WS error:", err);
+  });
+
   // Twilio -> OpenAI
   twilioWs.on("message", (message) => {
     let msg;
-
     try {
       msg = JSON.parse(message.toString());
-    } catch (e) {
-      console.log("Bad JSON from Twilio:", message.toString().slice(0, 200));
+    } catch {
+      console.log("Bad JSON from Twilio");
       return;
     }
 
     if (msg.event === "start") {
-      streamSid = msg.streamSid || msg.start?.streamSid;
+      streamSid = msg.start?.streamSid;
       console.log("Stream started. streamSid =", streamSid);
       return;
     }
 
-    if (msg.event === "media" && msg.media && msg.media.payload) {
+    if (msg.event === "media" && msg.media?.payload) {
       if (openaiWs.readyState === WebSocket.OPEN) {
         openaiWs.send(
           JSON.stringify({
@@ -107,9 +125,7 @@ wss.on("connection", (twilioWs) => {
 
     if (msg.event === "stop") {
       console.log("Stream stopped");
-      try {
-        openaiWs.close();
-      } catch {}
+      try { openaiWs.close(); } catch {}
       return;
     }
   });
@@ -120,9 +136,17 @@ wss.on("connection", (twilioWs) => {
     try {
       msg = JSON.parse(data.toString());
     } catch {
+      console.log("Bad JSON from OpenAI");
       return;
     }
 
+    // 🔥 If OpenAI sends an error event, log it (THIS will explain the disconnect)
+    if (msg.type === "error") {
+      console.error("OpenAI error event:", msg);
+      return;
+    }
+
+    // Stream audio chunks back to Twilio
     if (msg.type === "response.output_audio.delta" && msg.delta && streamSid) {
       twilioWs.send(
         JSON.stringify({
@@ -137,17 +161,7 @@ wss.on("connection", (twilioWs) => {
   // Cleanup
   twilioWs.on("close", () => {
     console.log("Twilio disconnected");
-    try {
-      openaiWs.close();
-    } catch {}
-  });
-
-  openaiWs.on("close", () => {
-    console.log("OpenAI disconnected");
-  });
-
-  openaiWs.on("error", (err) => {
-    console.error("OpenAI error:", err);
+    try { openaiWs.close(); } catch {}
   });
 });
 
