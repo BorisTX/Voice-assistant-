@@ -5,13 +5,11 @@ import WebSocket, { WebSocketServer } from "ws";
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
-// Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
 
-// Twilio Voice webhook -> TwiML that starts bidirectional media stream
 app.post("/voice", (req, res) => {
   const host = req.get("host");
-  const streamUrl = 'wss://${host}/media';
+  const streamUrl = wss://${host}/media;
 
   const twiml = `
 <Response>
@@ -27,74 +25,52 @@ app.post("/voice", (req, res) => {
 });
 
 const server = http.createServer(app);
-
-// WebSocket endpoint for Twilio Media Streams
 const wss = new WebSocketServer({ server, path: "/media" });
 
 wss.on("connection", (twilioWs) => {
   let streamSid = null;
 
-  // Connect to OpenAI Realtime over WebSocket
-  const openaiWs = new WebSocket("wss://api.openai.com/v1/realtime?model=gpt-realtime", {
-  headers: {
-    Authorization: 'Bearer ${process.env.OPENAI_API_KEY}',
-  },
-});
+  const openaiWs = new WebSocket(
+    "wss://api.openai.com/v1/realtime?model=gpt-realtime",
+    {
+      headers: {
+        Authorization: Bearer ${process.env.OPENAI_API_KEY},
+      },
+    }
+  );
 
   openaiWs.on("open", () => {
-  const msg = {
-    type: "session.update",
-    session: {
-      instructions:
-        "You are a helpful, natural-sounding voice assistant for a local HVAC company in Dallas–Fort Worth. " +
-        "Your job is to collect: name, phone, service address, issue, and preferred time. " +
-        "Detect emergencies (no AC, no heat, gas smell, burning smell, water leak) and tell the caller you will prioritize them. " +
-        "Do not quote prices or guarantees. Keep replies short.",
-      input_audio_format: "pcm_mulaw",
-      output_audio_format: "pcm_mulaw",
-      voice: "alloy"
-    }
-  };
+    // Minimal, valid session config (mulaw passthrough)
+    openaiWs.send(
+      JSON.stringify({
+        type: "session.update",
+        session: {
+          instructions:
+            "You are a friendly HVAC scheduling assistant in Dallas–Fort Worth. " +
+            "Ask short questions to collect: name, phone, address, issue, preferred time. " +
+            "If emergency (no AC/no heat/gas smell/burning smell/water leak), say you will prioritize and offer to connect to a tech. " +
+            "Do not quote prices. Keep it brief.",
+          input_audio_format: "pcm_mulaw",
+          output_audio_format: "pcm_mulaw",
+          voice: "alloy",
+        },
+      })
+    );
 
-  openaiWs.send(JSON.stringify(msg));
-});
-
-  // Receive events from OpenAI and forward audio back to Twilio
-  openaiWs.on("message", (data) => {
-    let msg;
-    try {
-      msg = JSON.parse(data.toString());
-    } catch {
-      return;
-    }
-
-    // When the model outputs audio chunks, forward them to Twilio as media messages.  [oai_citation:5‡OpenAI Developers](https://developers.openai.com/api/docs/guides/realtime/)
-    if (msg.type === "response.output_audio.delta" && msg.delta && streamSid) {
-      twilioWs.send(
-        JSON.stringify({
-          event: "media",
-          streamSid,
-          media: { payload: msg.delta },
-        })
-      );
-      return;
-    }
-
-    // If server VAD says speech stopped, ask model to respond.
-    // (In some configs the server can auto-respond; this makes it deterministic.)  [oai_citation:6‡OpenAI Developers](https://developers.openai.com/api/docs/guides/realtime-conversations/?utm_source=chatgpt.com)
-    if (msg.type === "input_audio_buffer.speech_stopped") {
-      openaiWs.send(
-        JSON.stringify({
-          type: "response.create",
-          response: {
-            output_modalities: ["audio"],
-          },
-        })
-      );
-    }
+    // Make the assistant speak first (quick sanity check)
+    openaiWs.send(
+      JSON.stringify({
+        type: "response.create",
+        response: {
+          output_modalities: ["audio"],
+          instructions:
+            "Say: 'Hi! This is the HVAC assistant. Is this an emergency, or do you want to schedule service?'",
+        },
+      })
+    );
   });
 
-  // Receive Twilio stream messages and send audio into OpenAI
+  // Twilio -> OpenAI
   twilioWs.on("message", (data) => {
     let msg;
     try {
@@ -109,10 +85,57 @@ wss.on("connection", (twilioWs) => {
     }
 
     if (msg.event === "media" && msg.media?.payload) {
-      // Append base64 μ-law audio to OpenAI input buffer  [oai_citation:7‡Twilio](https://www.twilio.com/docs/voice/media-streams/websocket-messages)
-      openaiWs.readyState === WebSocket.OPEN &&
+      if (openaiWs.readyState === WebSocket.OPEN) {
         openaiWs.send(
           JSON.stringify({
             type: "input_audio_buffer.append",
             audio: msg.media.payload,
           })
+        );
+      }
+      return;
+    }
+
+    if (msg.event === "stop") {
+      try {
+        openaiWs.close();
+      } catch {}
+    }
+  });
+
+  // OpenAI -> Twilio
+  openaiWs.on("message", (data) => {
+    let msg;
+    try {
+      msg = JSON.parse(data.toString());
+    } catch {
+      return;
+    }
+
+    if (msg.type === "response.output_audio.delta" && msg.delta && streamSid) {
+      twilioWs.send(
+        JSON.stringify({
+          event: "media",
+          streamSid,
+          media: { payload: msg.delta },
+        })
+      );
+    }
+  });
+
+  const cleanup = () => {
+    try {
+      openaiWs.close();
+    } catch {}
+    try {
+      twilioWs.close();
+    } catch {}
+  };
+
+  twilioWs.on("close", cleanup);
+  openaiWs.on("close", cleanup);
+  openaiWs.on("error", (e) => console.error("OpenAI WS error:", e));
+});
+
+const port = process.env.PORT || 3000;
+server.listen(port, () => console.log("Server listening on", port));
