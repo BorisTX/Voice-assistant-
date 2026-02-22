@@ -13,15 +13,13 @@ app.post("/voice", (req, res) => {
   const host = req.headers.host;
 
   const twiml = `
-    <Response>
-      <Connect>
-        <Stream url="wss://${host}/media" />
-      </Connect>
-    </Response>
-  `;
+<Response>
+  <Connect>
+    <Stream url="wss://${host}/media" />
+  </Connect>
+</Response>`;
 
-  res.type("text/xml");
-  res.send(twiml);
+  res.type("text/xml").send(twiml);
 });
 
 const server = http.createServer(app);
@@ -39,7 +37,7 @@ wss.on("connection", (twilioWs) => {
     "wss://api.openai.com/v1/realtime?model=gpt-realtime",
     {
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        Authorization: Bearer ${process.env.OPENAI_API_KEY},
       },
     }
   );
@@ -65,29 +63,37 @@ wss.on("connection", (twilioWs) => {
       })
     );
 
-    // Make assistant speak first
+    // Make assistant speak first (debug sanity check)
     openaiWs.send(
       JSON.stringify({
         type: "response.create",
         response: {
           output_modalities: ["audio"],
           instructions:
-            "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?",
+            "Say: Hi! This is the HVAC assistant. Is this an emergency, or would you like to schedule service?",
         },
       })
     );
   });
 
-  // Twilio → OpenAI
+  // Twilio -> OpenAI
   twilioWs.on("message", (message) => {
-    const msg = JSON.parse(message);
+    let msg;
 
-    if (msg.event === "start") {
-      streamSid = msg.start.streamSid;
+    try {
+      msg = JSON.parse(message.toString());
+    } catch (e) {
+      console.log("Bad JSON from Twilio:", message.toString().slice(0, 200));
       return;
     }
 
-    if (msg.event === "media" && msg.media?.payload) {
+    if (msg.event === "start") {
+      streamSid = msg.streamSid || msg.start?.streamSid;
+      console.log("Stream started. streamSid =", streamSid);
+      return;
+    }
+
+    if (msg.event === "media" && msg.media && msg.media.payload) {
       if (openaiWs.readyState === WebSocket.OPEN) {
         openaiWs.send(
           JSON.stringify({
@@ -100,24 +106,24 @@ wss.on("connection", (twilioWs) => {
     }
 
     if (msg.event === "stop") {
-      if (openaiWs.readyState === WebSocket.OPEN) {
-        openaiWs.send(
-          JSON.stringify({ type: "input_audio_buffer.commit" })
-        );
-
-        openaiWs.send(
-          JSON.stringify({ type: "response.create" })
-        );
-      }
+      console.log("Stream stopped");
+      try {
+        openaiWs.close();
+      } catch {}
+      return;
     }
   });
 
-  // OpenAI → Twilio
+  // OpenAI -> Twilio
   openaiWs.on("message", (data) => {
-    const msg = JSON.parse(data);
+    let msg;
+    try {
+      msg = JSON.parse(data.toString());
+    } catch {
+      return;
+    }
 
-    // Stream audio chunks back to Twilio
-    if (msg.type === "response.output_audio.delta" && msg.delta) {
+    if (msg.type === "response.output_audio.delta" && msg.delta && streamSid) {
       twilioWs.send(
         JSON.stringify({
           event: "media",
@@ -131,7 +137,9 @@ wss.on("connection", (twilioWs) => {
   // Cleanup
   twilioWs.on("close", () => {
     console.log("Twilio disconnected");
-    openaiWs.close();
+    try {
+      openaiWs.close();
+    } catch {}
   });
 
   openaiWs.on("close", () => {
