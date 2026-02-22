@@ -12,7 +12,7 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 app.post("/voice", (req, res) => {
   // IMPORTANT: wss URL must match your Render service domain
   const host = req.get("host"); // e.g. voice-assistant-xxxx.onrender.com
-  const streamUrl = 'wss://${host}/media';
+  const streamUrl = "wss://voice-assistant-7yq5.onrender.com/media";
 
   const twiml = `
 <Response>
