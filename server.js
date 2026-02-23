@@ -12,8 +12,16 @@ app.use((req, res, next) => {
 app.get("/", (req, res) => res.status(200).send("OK"));
 
 // Twilio webhook → returns TwiML with Media Stream
+// Browser test (GET)
 app.get("/voice", (req, res) => {
-  console.log("HIT /voice", new Date().toISOString());
+  console.log("GET /voice browser test");
+  res.status(200).send("VOICE OK (GET)");
+});
+
+// Twilio webhook (POST)
+app.post("/voice", (req, res) => {
+  console.log("POST /voice from Twilio");
+
   const host = req.headers.host;
 
   const twiml = `
