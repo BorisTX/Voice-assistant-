@@ -42,13 +42,15 @@ wss.on("connection", (twilioWs) => {
   }
 
   // Connect to OpenAI Realtime (GA interface)
-  const openaiWs = new WebSocket("wss://api.openai.com/v1/realtime?model=gpt-realtime", {
+  const openaiWs = new WebSocket(
+  "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
+  {
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      // Если вдруг у тебя аккаунт/проект ещё на beta-поведении — раскомментируй строку ниже:
-      // "OpenAI-Beta": "realtime=v1",
-    },
-  });
+      "OpenAI-Beta": "realtime=v1"
+    }
+  }
+);
 
   openaiWs.on("open", () => {
     console.log("Connected to OpenAI");
