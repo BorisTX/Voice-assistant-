@@ -20,7 +20,8 @@ export function initDb() {
 
     // гарантируем 1 строку
     db.run(
-      INSERT OR IGNORE INTO oauth_tokens (id, updated_at) VALUES (1, strftime('%s','now'))
+      `INSERT OR IGNORE INTO oauth_tokens (id, updated_at)
+       VALUES (1, strftime('%s','now'))`
     );
   });
 }
@@ -46,8 +47,7 @@ export function saveTokens(tokens) {
   const updated_at = Math.floor(Date.now() / 1000);
 
   return new Promise((resolve, reject) => {
-    // ВАЖНО: refresh_token может приходить только один раз.
-    // Поэтому сохраняем refresh_token только если он пришёл, иначе оставляем старый.
+    // refresh_token может прийти только один раз — если null, оставляем старый
     db.run(
       `
       UPDATE oauth_tokens
@@ -59,7 +59,7 @@ export function saveTokens(tokens) {
         expiry_date = COALESCE(?, expiry_date),
         updated_at = ?
       WHERE id = 1
-    `,
+      `,
       [access_token, refresh_token, scope, token_type, expiry_date, updated_at],
       (err) => {
         if (err) return reject(err);
