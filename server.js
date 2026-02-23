@@ -4,9 +4,7 @@ import WebSocket, { WebSocketServer } from "ws";
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
-app.use((req, res, next) => {
-  console.log("INCOMING:", req.method, req.url);
-  next();
+
 });
 app.use((req, res, next) => {
   console.log("INCOMING:", req.method, req.url);
@@ -39,7 +37,11 @@ app.post("/voice", (req, res) => {
 
   res.type("text/xml").send(twiml);
 });
-
+// 404 logger (ставь ПОСЛЕ всех маршрутов)
+app.use((req, res) => {
+  console.log("404:", req.method, req.url);
+  res.status(404).send("Not Found");
+});
 const server = http.createServer(app);
 
 // WebSocket endpoint for Twilio
@@ -59,12 +61,11 @@ wss.on("connection", (twilioWs) => {
 
   // Connect to OpenAI Realtime (GA interface)
   const openaiWs = new WebSocket(
-  "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
+  "wss://api.openai.com/v1/realtime?model=gpt-realtime",
   {
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      "OpenAI-Beta": "realtime=v1"
-    }
+    },
   }
 );
 
@@ -88,9 +89,7 @@ wss.on("connection", (twilioWs) => {
   type: "response.create",
   response: {
     modalities: ["audio", "text"],
-    instructions:
-      "You are a friendly HVAC scheduling assistant. " +
-      "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?"
+    instructions: "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?"
   }
 }));
   });
