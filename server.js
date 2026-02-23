@@ -187,7 +187,7 @@ wss.on("connection", (twilioWs) => {
     }
   });
 
- // OpenAI → Twilio
+ // OpenAI → Twilio (CONVERT PCM -> μ-law 8k so Twilio plays clean audio)
 openaiWs.on("message", (data) => {
   const text = data.toString();
   console.log("OpenAI raw:", text.slice(0, 400));
@@ -195,20 +195,30 @@ openaiWs.on("message", (data) => {
   let msg;
   try {
     msg = JSON.parse(text);
-  } catch (e) {
+  } catch {
     console.log("Bad JSON from OpenAI");
     return;
   }
 
   if (msg.type === "response.output_audio.delta" && msg.delta) {
-  if (!streamSid) return;
+    if (!streamSid) return;
 
-  twilioWs.send(JSON.stringify({
-    event: "media",
-    streamSid,
-    media: { payload: msg.delta },
-  }));
-}
+    const raw = Buffer.from(msg.delta, "base64");
+    console.log("AUDIO DELTA BYTES:", raw.length);
+
+    // Assume PCM16LE 24k from OpenAI -> downsample to 8k -> μ-law encode
+    const pcm16 = pcm16leToInt16(raw);
+    const pcm8k = downsample24kTo8k(pcm16);
+    const mulawBuf = int16ToMulawBuffer(pcm8k);
+
+    twilioWs.send(
+      JSON.stringify({
+        event: "media",
+        streamSid,
+        media: { payload: mulawBuf.toString("base64") },
+      })
+    );
+  }
 });
 
   // Cleanup
