@@ -76,11 +76,16 @@ wss.on("connection", (twilioWs) => {
     openaiWs.send(JSON.stringify({
   type: "session.update",
   session: {
+    type: "realtime",                     // ← ВАЖНО
+    model: "gpt-realtime",                // ← ВАЖНО
     instructions:
       "You are a friendly HVAC assistant in Dallas-Fort Worth. " +
       "Ask briefly for name, phone, address, issue, and preferred time. " +
-      "If emergency (no AC, no heat, gas smell, water leak), prioritize immediately. " +
-      "Keep responses short and natural."
+      "If emergency (no AC, no heat, gas smell, water leak), prioritize immediately.",
+    turn_detection: { type: "server_vad" },
+    input_audio_format: "g711_ulaw",
+    output_audio_format: "g711_ulaw",
+    voice: "alloy"
   }
 }));
 
@@ -88,8 +93,8 @@ wss.on("connection", (twilioWs) => {
     openaiWs.send(JSON.stringify({
   type: "response.create",
   response: {
-    modalities: ["audio", "text"],
-    instructions: "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?"
+    instructions:
+      "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?"
   }
 }));
   });
