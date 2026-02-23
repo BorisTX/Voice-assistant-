@@ -46,7 +46,49 @@ const server = http.createServer(app);
 
 // WebSocket endpoint for Twilio
 const wss = new WebSocketServer({ server, path: "/media" });
+// ===== PCM16 -> (24k->8k) -> G711 μ-law helpers =====
+function pcm16leToInt16(buf) {
+  const out = new Int16Array(buf.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = buf.readInt16LE(i * 2);
+  return out;
+}
 
+// 24k -> 8k = берем каждый 3-й сэмпл (быстро и достаточно)
+function downsample24kTo8k(int16Samples) {
+  const factor = 3;
+  const outLen = Math.floor(int16Samples.length / factor);
+  const out = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i++) out[i] = int16Samples[i * factor];
+  return out;
+}
+
+// G.711 μ-law encoder
+function linearToMulawSample(sample) {
+  const MULAW_MAX = 0x1FFF;
+  const BIAS = 0x84;
+
+  let sign = (sample >> 8) & 0x80;
+  if (sign) sample = -sample;
+  if (sample > MULAW_MAX) sample = MULAW_MAX;
+
+  sample += BIAS;
+
+  let exponent = 7;
+  for (let expMask = 0x4000; (sample & expMask) === 0 && exponent > 0; expMask >>= 1) {
+    exponent--;
+  }
+
+  const mantissa = (sample >> (exponent + 3)) & 0x0F;
+  const mulaw = ~(sign | (exponent << 4) | mantissa);
+  return mulaw & 0xff;
+}
+
+function int16ToMulawBuffer(int16Samples) {
+  const out = Buffer.alloc(int16Samples.length);
+  for (let i = 0; i < int16Samples.length; i++) out[i] = linearToMulawSample(int16Samples[i]);
+  return out;
+}
+// ===== end helpers =====
 wss.on("connection", (twilioWs) => {
   console.log("Twilio connected");
 
