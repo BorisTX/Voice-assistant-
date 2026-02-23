@@ -75,7 +75,7 @@ wss.on("connection", (twilioWs) => {
       "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?"
   }
 }));
-
+  });
   // Helpful debug logs
   openaiWs.on("close", (code, reason) => {
     console.log("OpenAI disconnected", { code, reason: reason?.toString() });
@@ -141,7 +141,6 @@ openaiWs.on("message", (data) => {
         media: { payload: msg.delta },
       })
     );
-  }
   }
 });
 
