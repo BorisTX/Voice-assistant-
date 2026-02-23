@@ -71,7 +71,7 @@ wss.on("connection", (twilioWs) => {
     openaiWs.send(JSON.stringify({
   type: "response.create",
   response: {
-    modalities: ["audio"],
+    modalities: ["audio", "text"],
     instructions:
       "You are a friendly HVAC scheduling assistant. " +
       "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?"
