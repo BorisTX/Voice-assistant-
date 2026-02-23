@@ -19,11 +19,6 @@ app.use((req, res, next) => {
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
 
-
-app.get("/auth/google", async (req, res) => {
-  
-});
-
 app.get("/oauth2/callback", async (req, res) => {
   try {
     const code = req.query.code;
@@ -41,11 +36,9 @@ app.get("/auth/google", (req, res) => {
   try {
     const url = getAuthUrl(oauth2Client);
     console.log("AUTH URL:", url);
-
     if (!url || typeof url !== "string") {
       return res.status(500).send("getAuthUrl() returned empty URL. Check env vars.");
     }
-
     return res.redirect(url);
   } catch (e) {
     console.error("ERROR in /auth/google:", e);
@@ -53,23 +46,6 @@ app.get("/auth/google", (req, res) => {
   }
 });
 
-
-app.get("/auth/google/callback", async (req, res) => {
-  try {
-    const code = req.query.code;
-const code = req.query.code;
-if (!code) return res.status(400).send("Missing code");
-    const { tokens } = await oauth2Client.getToken(code);
-    oauth2Client.setCredentials(tokens);
-
-    console.log("GOOGLE TOKENS:", tokens);
-
-    res.send("Google Calendar connected successfully 👹🔥");
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("OAuth error");
-  }
-});
 // Twilio webhook → returns TwiML with Media Stream
 // Browser test (GET)
 app.get("/voice", (req, res) => {
