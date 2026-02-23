@@ -1,21 +1,13 @@
 import express from "express";
 import http from "http";
 import WebSocket, { WebSocketServer } from "ws";
-import { google } from "googleapis";
-import express from "express";
-import http from "http";
-import WebSocket, { WebSocketServer } from "ws";
-import { google } from "googleapis";
+
 
 import { initDb } from "./db.js";
 import { makeOAuthClient, getAuthUrl, loadTokensIntoClient, exchangeCodeAndStore } from "./googleAuth.js";
 
 initDb();
-const oauth2Client = new google.auth.OAuth2(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI
-);
+const oauth2Client = makeOAuthClient();
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
@@ -26,6 +18,25 @@ app.use((req, res, next) => {
 });
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
+
+
+app.get("/auth/google", async (req, res) => {
+  
+});
+
+app.get("/oauth2/callback", async (req, res) => {
+  try {
+    const code = req.query.code;
+    if (!code) return res.status(400).send("Missing code");
+
+    await exchangeCodeAndStore(oauth2Client, code);
+
+    res.status(200).send("Google Calendar connected successfully 😈🔥");
+  } catch (e) {
+    console.error("OAuth callback error:", e);
+    res.status(500).send("OAuth failed");
+  }
+});
 app.get("/auth/google", (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
