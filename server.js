@@ -66,17 +66,15 @@ wss.on("connection", (twilioWs) => {
 }));
 
     // Make assistant speak first
-    openaiWs.send(
-      JSON.stringify({
-        type: "response.create",
-        response: {
-          output_modalities: ["audio"],
-          instructions:
-            "Say: Hi! This is the HVAC scheduling assistant. Is this an emergency, or would you like to schedule service?",
-        },
-      })
-    );
-  });
+    openaiWs.send(JSON.stringify({
+  type: "response.create",
+  response: {
+    modalities: ["audio"],
+    instructions:
+      "You are a friendly HVAC scheduling assistant. " +
+      "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?"
+  }
+}));
 
   // Helpful debug logs
   openaiWs.on("close", (code, reason) => {
@@ -122,33 +120,29 @@ wss.on("connection", (twilioWs) => {
     }
   });
 
-  // OpenAI -> Twilio
-  openaiWs.on("message", (data) => {
-    let msg;
-    try {
-      msg = JSON.parse(data.toString());
-    } catch {
-      console.log("Bad JSON from OpenAI");
-      return;
-    }
+ // OpenAI → Twilio
+openaiWs.on("message", (data) => {
+  const text = data.toString();
+  console.log("OpenAI raw:", text.slice(0, 400));
 
-    // 🔥 If OpenAI sends an error event, log it (THIS will explain the disconnect)
-    if (msg.type === "error") {
-      console.error("OpenAI error event:", msg);
-      return;
-    }
+  let msg;
+  try {
+    msg = JSON.parse(text);
+  } catch (e) {
+    console.log("Bad JSON from OpenAI");
+    return;
+  }
 
-    // Stream audio chunks back to Twilio
-    if (msg.type === "response.output_audio.delta" && msg.delta && streamSid) {
-      twilioWs.send(
-        JSON.stringify({
-          event: "media",
-          streamSid,
-          media: { payload: msg.delta },
-        })
-      );
-    }
-  });
+  if (msg.type === "response.output_audio.delta" && msg.delta) {
+    twilioWs.send(
+      JSON.stringify({
+        event: "media",
+        streamSid,
+        media: { payload: msg.delta },
+      })
+    );
+  }
+});
 
   // Cleanup
   twilioWs.on("close", () => {
