@@ -142,6 +142,7 @@ openaiWs.on("message", (data) => {
       })
     );
   }
+  }
 });
 
   // Cleanup
