@@ -2,7 +2,15 @@ import express from "express";
 import http from "http";
 import WebSocket, { WebSocketServer } from "ws";
 import { google } from "googleapis";
+import express from "express";
+import http from "http";
+import WebSocket, { WebSocketServer } from "ws";
+import { google } from "googleapis";
 
+import { initDb } from "./db.js";
+import { makeOAuthClient, getAuthUrl, loadTokensIntoClient, exchangeCodeAndStore } from "./googleAuth.js";
+
+initDb();
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
