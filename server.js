@@ -53,12 +53,12 @@ app.get("/auth/google", (req, res) => {
   }
 });
 
-  res.redirect(url);
-});
+
 app.get("/auth/google/callback", async (req, res) => {
   try {
     const code = req.query.code;
-
+const code = req.query.code;
+if (!code) return res.status(400).send("Missing code");
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
 
