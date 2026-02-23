@@ -9,7 +9,7 @@ app.use(express.urlencoded({ extended: false }));
 app.get("/", (req, res) => res.status(200).send("OK"));
 
 // Twilio webhook → returns TwiML with Media Stream
-app.post("/voice", (req, res) => {
+app.get("/voice", (req, res) => {
   const host = req.headers.host;
 
   const twiml = `
