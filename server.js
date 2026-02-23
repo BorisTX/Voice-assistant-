@@ -1,7 +1,13 @@
 import express from "express";
 import http from "http";
 import WebSocket, { WebSocketServer } from "ws";
+import { google } from "googleapis";
 
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI
+);
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
@@ -12,7 +18,32 @@ app.use((req, res, next) => {
 });
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
+app.get("/auth/google", (req, res) => {
+  const url = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    scope: [
+      "https://www.googleapis.com/auth/calendar"
+    ]
+  });
 
+  res.redirect(url);
+});
+app.get("/auth/google/callback", async (req, res) => {
+  try {
+    const code = req.query.code;
+
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    console.log("GOOGLE TOKENS:", tokens);
+
+    res.send("Google Calendar connected successfully 👹🔥");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("OAuth error");
+  }
+});
 // Twilio webhook → returns TwiML with Media Stream
 // Browser test (GET)
 app.get("/voice", (req, res) => {
