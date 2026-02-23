@@ -38,13 +38,20 @@ app.get("/oauth2/callback", async (req, res) => {
   }
 });
 app.get("/auth/google", (req, res) => {
-  const url = oauth2Client.generateAuthUrl({
-    access_type: "offline",
-    prompt: "consent",
-    scope: [
-      "https://www.googleapis.com/auth/calendar"
-    ]
-  });
+  try {
+    const url = getAuthUrl(oauth2Client);
+    console.log("AUTH URL:", url);
+
+    if (!url || typeof url !== "string") {
+      return res.status(500).send("getAuthUrl() returned empty URL. Check env vars.");
+    }
+
+    return res.redirect(url);
+  } catch (e) {
+    console.error("ERROR in /auth/google:", e);
+    return res.status(500).send("OAuth error: " + (e?.message || String(e)));
+  }
+});
 
   res.redirect(url);
 });
