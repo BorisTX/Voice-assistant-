@@ -136,14 +136,14 @@ openaiWs.on("message", (data) => {
   }
 
   if (msg.type === "response.output_audio.delta" && msg.delta) {
-    twilioWs.send(
-      JSON.stringify({
-        event: "media",
-        streamSid,
-        media: { payload: msg.delta },
-      })
-    );
-  }
+  if (!streamSid) return;
+
+  twilioWs.send(JSON.stringify({
+    event: "media",
+    streamSid,
+    media: { payload: msg.delta },
+  }));
+}
 });
 
   // Cleanup
