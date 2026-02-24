@@ -3,7 +3,6 @@ import http from "http";
 import WebSocket, { WebSocketServer } from "ws";
 import { getTokens } from "./db.js";
 import { google } from "googleapis";
-import { loadTokensIntoClient } from "./googleAuth.js";
 import { initDb } from "./db.js";
 import { makeOAuthClient, getAuthUrl, loadTokensIntoClient, exchangeCodeAndStore } from "./googleAuth.js";
 
