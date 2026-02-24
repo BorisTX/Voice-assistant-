@@ -1,8 +1,9 @@
 import express from "express";
 import http from "http";
 import WebSocket, { WebSocketServer } from "ws";
-
-
+import { getTokens } from "./db.js";
+import { google } from "googleapis";
+import { loadTokensIntoClient } from "./googleAuth.js";
 import { initDb } from "./db.js";
 import { makeOAuthClient, getAuthUrl, loadTokensIntoClient, exchangeCodeAndStore } from "./googleAuth.js";
 
@@ -45,7 +46,16 @@ app.get("/auth/google", (req, res) => {
     return res.status(500).send("OAuth error: " + (e?.message || String(e)));
   }
 });
-
+app.get("/debug/tokens", async (req, res) => {
+  const row = await getTokens();
+  res.json({
+    hasAccessToken: !!row?.access_token,
+    hasRefreshToken: !!row?.refresh_token,
+    scope: row?.scope,
+    expiry_date: row?.expiry_date,
+    updated_at: row?.updated_at,
+  });
+});
 // Twilio webhook → returns TwiML with Media Stream
 // Browser test (GET)
 app.get("/voice", (req, res) => {
@@ -63,6 +73,36 @@ app.get("/auth/google/callback", async (req, res) => {
   } catch (e) {
     console.error("OAuth callback error:", e);
     res.status(500).send("OAuth failed");
+  }
+});
+
+
+app.get("/debug/calendar", async (req, res) => {
+  try {
+    await loadTokensIntoClient(oauth2Client);
+
+    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+
+    const now = new Date().toISOString();
+    const result = await calendar.events.list({
+      calendarId: "primary",
+      timeMin: now,
+      maxResults: 10,
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    res.json({
+      ok: true,
+      items: result.data.items?.map((e) => ({
+        summary: e.summary,
+        start: e.start?.dateTime || e.start?.date,
+        end: e.end?.dateTime || e.end?.date,
+      })),
+    });
+  } catch (e) {
+    console.error("DEBUG calendar error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 // Twilio webhook (POST)
