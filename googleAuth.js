@@ -44,8 +44,6 @@ export async function loadTokensIntoClient(oauth2Client) {
     // newTokens может содержать access_token и иногда refresh_token
     await saveTokens(newTokens);
   });
-}
-
 export async function exchangeCodeAndStore(oauth2Client, code) {
   const { tokens } = await oauth2Client.getToken(code);
   await saveTokens(tokens);
