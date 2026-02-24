@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
 
-app.get("/oauth2/callback", async (req, res) => {
+app.get("/auth/google/callback", async (req, res) => {
   try {
     const code = req.query.code;
     if (!code) return res.status(400).send("Missing code");
@@ -52,7 +52,19 @@ app.get("/voice", (req, res) => {
   console.log("GET /voice browser test");
   res.status(200).send("VOICE OK (GET)");
 });
+app.get("/auth/google/callback", async (req, res) => {
+  try {
+    const code = req.query.code;
+    if (!code) return res.status(400).send("Missing code");
 
+    await exchangeCodeAndStore(oauth2Client, code);
+
+    res.status(200).send("Google Calendar connected successfully 😈🔥");
+  } catch (e) {
+    console.error("OAuth callback error:", e);
+    res.status(500).send("OAuth failed");
+  }
+});
 // Twilio webhook (POST)
 app.post("/voice", (req, res) => {
   console.log("POST /voice from Twilio");
