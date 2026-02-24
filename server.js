@@ -55,6 +55,42 @@ app.get("/debug/tokens", async (req, res) => {
     updated_at: row?.updated_at,
   });
 });
+// ...
+app.get("/debug/calendar", async (req, res) => {
+  try {
+    // 1) загрузить токены в oauth2Client (важно)
+    await loadTokensIntoClient(oauth2Client);
+
+    // 2) дернуть Calendar API
+    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+
+    const now = new Date().toISOString();
+    const out = await calendar.events.list({
+      calendarId: "primary",
+      timeMin: now,
+      maxResults: 10,
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    const items = out.data.items || [];
+    res.json({
+      ok: true,
+      count: items.length,
+      next10: items.map((e) => ({
+        id: e.id,
+        summary: e.summary,
+        start: e.start?.dateTime || e.start?.date,
+      })),
+    });
+  } catch (err) {
+    console.error("DEBUG /calendar error:", err);
+    res.status(500).json({
+      ok: false,
+      error: err?.message || String(err),
+    });
+  }
+});
 // Twilio webhook → returns TwiML with Media Stream
 // Browser test (GET)
 app.get("/voice", (req, res) => {
