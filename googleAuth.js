@@ -1,7 +1,7 @@
 // googleAuth.js
 import { google } from "googleapis";
 import { getTokens, saveTokens } from "./db.js";
-
+import { getTokens } from "./db.js";
 const SCOPES = [
   "https://www.googleapis.com/auth/calendar", // full access (для MVP)
   // потом можно сузить до calendar.events если захочешь
@@ -27,25 +27,20 @@ export function getAuthUrl(oauth2Client) {
     scope: SCOPES,
   });
 }
-
 export async function loadTokensIntoClient(oauth2Client) {
   const row = await getTokens();
-  if (!row) return null;
 
-  const tokens = {
-    access_token: row.access_token || undefined,
-    refresh_token: row.refresh_token || undefined,
-    scope: row.scope || undefined,
-    token_type: row.token_type || undefined,
-    expiry_date: row.expiry_date || undefined,
-  };
-
-  // если refresh_token отсутствует — значит не подключили офлайн доступ
-  if (!tokens.refresh_token) return null;
-
-  oauth2Client.setCredentials(tokens);
-
-  // Подписываемся на обновление токенов
+  if (!row || !row.access_token) {
+    throw new Error("No tokens in DB");
+  }
+  oauth2Client.setCredentials({
+    access_token: row.access_token,
+    refresh_token: row.refresh_token,
+    scope: row.scope,
+    token_type: row.token_type,
+    expiry_date: row.expiry_date,
+  });
+}
   oauth2Client.on("tokens", async (newTokens) => {
     // newTokens может содержать access_token и иногда refresh_token
     await saveTokens(newTokens);
