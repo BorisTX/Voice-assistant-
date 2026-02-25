@@ -5,8 +5,8 @@ import { getTokens } from "./db.js";
 import { google } from "googleapis";
 import { initDb } from "./db.js";
 import { makeOAuthClient, getAuthUrl, loadTokensIntoClient, exchangeCodeAndStore } from "./googleAuth.js";
-
-initDb();
+import { openDb, runMigrations } from "./src/db/migrate.js";
+//initDb();
 const oauth2Client = makeOAuthClient();
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -18,7 +18,16 @@ app.use((req, res, next) => {
 });
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
-
+app.get("/debug/db", (req, res) => {
+  const db = openDb();
+  db.all(
+    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+    (err, rows) => {
+      if (err) return res.status(500).json({ ok: false, error: String(err) });
+      res.json({ ok: true, tables: rows.map((r) => r.name) });
+    }
+  );
+});
 app.get("/auth/google/callback", async (req, res) => {
   try {
     const code = req.query.code;
@@ -347,8 +356,27 @@ openaiWs.on("message", (data) => {
     try { openaiWs.close(); } catch {}
   });
 });
-
 const port = process.env.PORT || 3000;
-server.listen(port, () => {
-  console.log("Voice assistant is running 🚀 on port", port);
+
+async function start() {
+  console.log("Starting server...");
+
+  // 1️⃣ Открываем БД
+  const db = openDb();
+
+  // 2️⃣ Прогоняем миграции
+  await runMigrations(db);
+
+  console.log("✅ Migrations completed");
+
+  // 3️⃣ Запускаем HTTP + WebSocket
+  server.listen(port, () => {
+    console.log("Voice assistant is running 🚀 on port", port);
+  });
+}
+
+start().catch((err) => {
+  console.error("❌ Startup failed:", err);
+  process.exit(1);
 });
+
