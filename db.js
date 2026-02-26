@@ -1,132 +1,197 @@
-// db.js
-import sqlite3 from "sqlite3";
+// db.js (multi-tenant only; uses the db instance from openDb())
 
-const DB_PATH = process.env.SQLITE_PATH || "./data.sqlite";
-const db = new sqlite3.Database(DB_PATH);
-
-export function initDb() {
-  db.serialize(() => {
-    db.run(`
-      CREATE TABLE IF NOT EXISTS oauth_tokens (
-        id INTEGER PRIMARY KEY,
-        access_token TEXT,
-        refresh_token TEXT,
-        scope TEXT,
-        token_type TEXT,
-        expiry_date INTEGER,
-        updated_at INTEGER
-      )
-    `);
-
-    // гарантируем 1 строку
-    db.run(
-      `INSERT OR IGNORE INTO oauth_tokens (id, updated_at)
-       VALUES (1, strftime('%s','now'))`
-    );
+// --- tiny promise helpers ---
+function run(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      if (err) return reject(err);
+      resolve({ changes: this.changes, lastID: this.lastID });
+    });
   });
 }
 
-export function getTokens() {
+function get(db, sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.get(`SELECT * FROM oauth_tokens WHERE id = 1`, (err, row) => {
+    db.get(sql, params, (err, row) => {
       if (err) return reject(err);
       resolve(row || null);
     });
   });
 }
 
-export function saveTokens(tokens) {
-  const {
-    access_token = null,
-    refresh_token = null,
-    scope = null,
-    token_type = null,
-    expiry_date = null,
-  } = tokens || {};
-
-  const updated_at = Math.floor(Date.now() / 1000);
-
+function all(db, sql, params = []) {
   return new Promise((resolve, reject) => {
-    // refresh_token может прийти только один раз — если null, оставляем старый
-    db.run(
-      `
-      UPDATE oauth_tokens
-      SET
-        access_token = COALESCE(?, access_token),
-        refresh_token = COALESCE(?, refresh_token),
-        scope = COALESCE(?, scope),
-        token_type = COALESCE(?, token_type),
-        expiry_date = COALESCE(?, expiry_date),
-        updated_at = ?
-      WHERE id = 1
-      `,
-      [access_token, refresh_token, scope, token_type, expiry_date, updated_at],
-      (err) => {
-        if (err) return reject(err);
-        resolve(true);
-      }
-    );
+    db.all(sql, params, (err, rows) => {
+      if (err) return reject(err);
+      resolve(rows || []);
+    });
   });
 }
 
-export function upsertGoogleTokens(businessId, tokens) {
+// --- businesses ---
+export async function getBusinessById(db, businessId) {
+  return get(
+    db,
+    `SELECT id, name, industry, timezone, working_hours_json,
+            default_duration_min, slot_granularity_min,
+            buffer_before_min, buffer_after_min,
+            lead_time_min, max_days_ahead, max_daily_jobs,
+            emergency_enabled, emergency_keywords_json,
+            created_at_utc, updated_at_utc
+     FROM businesses
+     WHERE id = ?`,
+    [businessId]
+  );
+}
+
+export async function getBusinessByName(db, name) {
+  return get(
+    db,
+    `SELECT id, name, timezone
+     FROM businesses
+     WHERE name = ?
+     LIMIT 1`,
+    [name]
+  );
+}
+
+export async function listBusinesses(db) {
+  return all(
+    db,
+    `SELECT id, name, industry, timezone, created_at_utc
+     FROM businesses
+     ORDER BY created_at_utc DESC`
+  );
+}
+
+export async function insertBusiness(db, business) {
+  const now = new Date().toISOString();
+
+  const {
+    id,
+    name,
+    industry = "hvac",
+    timezone = "America/Chicago",
+    working_hours_json = "{}",
+    default_duration_min = 60,
+    slot_granularity_min = 15,
+    buffer_before_min = 0,
+    buffer_after_min = 30,
+    lead_time_min = 60,
+    max_days_ahead = 7,
+    max_daily_jobs = null,
+    emergency_enabled = 1,
+    emergency_keywords_json = "[]",
+  } = business;
+
+  if (!id) throw new Error("insertBusiness: missing id");
+  if (!name) throw new Error("insertBusiness: missing name");
+
+  await run(
+    db,
+    `
+    INSERT INTO businesses (
+      id, name, industry, timezone, working_hours_json,
+      default_duration_min, slot_granularity_min,
+      buffer_before_min, buffer_after_min,
+      lead_time_min, max_days_ahead, max_daily_jobs,
+      emergency_enabled, emergency_keywords_json,
+      created_at_utc, updated_at_utc
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    [
+      id,
+      name,
+      industry,
+      timezone,
+      working_hours_json,
+      default_duration_min,
+      slot_granularity_min,
+      buffer_before_min,
+      buffer_after_min,
+      lead_time_min,
+      max_days_ahead,
+      max_daily_jobs,
+      emergency_enabled,
+      emergency_keywords_json,
+      now,
+      now,
+    ]
+  );
+
+  return id;
+}
+
+// --- google tokens (single source of truth) ---
+export async function upsertGoogleTokens(db, businessId, tokens) {
   const {
     access_token = null,
     refresh_token = null,
     scope = null,
     token_type = null,
-    expiry_date = null,
+    expiry_date = null, // ms from google
   } = tokens || {};
 
   const now = new Date().toISOString();
+  const expiryIso =
+    typeof expiry_date === "number" ? new Date(expiry_date).toISOString() : null;
 
-  // expiry_date приходит как число (ms). Храним как ISO string.
-  const expiryIso = typeof expiry_date === "number" ? new Date(expiry_date).toISOString() : null;
+  // IMPORTANT: do not overwrite refresh_token with null
+  await run(
+    db,
+    `
+    INSERT INTO google_tokens (
+      business_id, access_token, refresh_token, scope, token_type, expiry_date_utc,
+      created_at_utc, updated_at_utc
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(business_id) DO UPDATE SET
+      access_token    = COALESCE(excluded.access_token, google_tokens.access_token),
+      refresh_token   = COALESCE(excluded.refresh_token, google_tokens.refresh_token),
+      scope           = COALESCE(excluded.scope, google_tokens.scope),
+      token_type      = COALESCE(excluded.token_type, google_tokens.token_type),
+      expiry_date_utc = COALESCE(excluded.expiry_date_utc, google_tokens.expiry_date_utc),
+      updated_at_utc  = excluded.updated_at_utc
+    `,
+    [
+      businessId,
+      access_token,
+      refresh_token,
+      scope,
+      token_type,
+      expiryIso,
+      now,
+      now,
+    ]
+  );
 
-  return new Promise((resolve, reject) => {
-    db.run(
-      `
-      INSERT INTO google_tokens (
-        business_id, access_token, refresh_token, scope, token_type, expiry_date_utc,
-        created_at_utc, updated_at_utc
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(business_id) DO UPDATE SET
-        access_token    = COALESCE(excluded.access_token, google_tokens.access_token),
-        refresh_token   = COALESCE(excluded.refresh_token, google_tokens.refresh_token),
-        scope           = COALESCE(excluded.scope, google_tokens.scope),
-        token_type      = COALESCE(excluded.token_type, google_tokens.token_type),
-        expiry_date_utc = COALESCE(excluded.expiry_date_utc, google_tokens.expiry_date_utc),
-        updated_at_utc  = excluded.updated_at_utc
-      `,
-      [
-        businessId,
-        access_token,
-        refresh_token,
-        scope,
-        token_type,
-        expiryIso,
-        now,
-        now,
-      ],
-      (err) => {
-        if (err) return reject(err);
-        resolve(true);
-      }
-    );
-  });
+  return true;
 }
-export function getGoogleTokens(businessId) {
-  return new Promise((resolve, reject) => {
-    db.get(
-      `SELECT business_id, access_token, refresh_token, scope, token_type, expiry_date_utc, updated_at_utc
-       FROM google_tokens
-       WHERE business_id = ?`,
-      [businessId],
-      (err, row) => {
-        if (err) return reject(err);
-        resolve(row || null);
-      }
-    );
-  });
+
+export async function getGoogleTokens(db, businessId) {
+  return get(
+    db,
+    `
+    SELECT business_id, access_token, refresh_token, scope, token_type,
+           expiry_date_utc, created_at_utc, updated_at_utc
+    FROM google_tokens
+    WHERE business_id = ?
+    `,
+    [businessId]
+  );
+}
+
+export async function assertBusinessExists(db, businessId) {
+  const row = await get(db, `SELECT id FROM businesses WHERE id = ?`, [businessId]);
+  if (!row) throw new Error(`Unknown business_id: ${businessId}`);
+  return true;
+}
+
+// --- debug helpers ---
+export async function listTables(db) {
+  const rows = await all(
+    db,
+    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+  );
+  return rows.map((r) => r.name);
 }
