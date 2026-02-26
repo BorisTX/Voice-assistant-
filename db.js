@@ -68,3 +68,51 @@ export function saveTokens(tokens) {
     );
   });
 }
+
+export function upsertGoogleTokens(businessId, tokens) {
+  const {
+    access_token = null,
+    refresh_token = null,
+    scope = null,
+    token_type = null,
+    expiry_date = null,
+  } = tokens || {};
+
+  const now = new Date().toISOString();
+
+  // expiry_date приходит как число (ms). Храним как ISO string.
+  const expiryIso = typeof expiry_date === "number" ? new Date(expiry_date).toISOString() : null;
+
+  return new Promise((resolve, reject) => {
+    db.run(
+      `
+      INSERT INTO google_tokens (
+        business_id, access_token, refresh_token, scope, token_type, expiry_date_utc,
+        created_at_utc, updated_at_utc
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(business_id) DO UPDATE SET
+        access_token    = COALESCE(excluded.access_token, google_tokens.access_token),
+        refresh_token   = COALESCE(excluded.refresh_token, google_tokens.refresh_token),
+        scope           = COALESCE(excluded.scope, google_tokens.scope),
+        token_type      = COALESCE(excluded.token_type, google_tokens.token_type),
+        expiry_date_utc = COALESCE(excluded.expiry_date_utc, google_tokens.expiry_date_utc),
+        updated_at_utc  = excluded.updated_at_utc
+      `,
+      [
+        businessId,
+        access_token,
+        refresh_token,
+        scope,
+        token_type,
+        expiryIso,
+        now,
+        now,
+      ],
+      (err) => {
+        if (err) return reject(err);
+        resolve(true);
+      }
+    );
+  });
+}
