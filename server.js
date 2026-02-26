@@ -6,7 +6,9 @@ import http from "http";
 import WebSocket, { WebSocketServer } from "ws";
 import crypto from "crypto";
 import { google } from "googleapis";
-
+import { DateTime } from "luxon";
+import { normalizeBusyUtc, generateSlots } from "./src/slots.js";
+import { getBusinessById } from "./db.js";
 import { openDb, runMigrations } from "./src/db/migrate.js";
 
 import {
@@ -217,7 +219,81 @@ app.get("/debug/calendar-business", async (req, res) => {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+app.get("/api/available-slots", async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
 
+    const businessId = String(req.query.business_id || "");
+    if (!businessId) return res.status(400).json({ ok: false, error: "Missing business_id" });
+
+    const business = await getBusinessById(db, businessId);
+    if (!business) return res.status(404).json({ ok: false, error: "Business not found" });
+
+    const tz = business.timezone || "America/Chicago";
+
+    const durationMin = req.query.duration_min ? Number(req.query.duration_min) : Number(business.default_duration_min || 60);
+    const daysReq = req.query.days ? Number(req.query.days) : Number(business.max_days_ahead || 7);
+    const days = Math.max(1, Math.min(daysReq, Number(business.max_days_ahead || 7)));
+
+    // from=YYYY-MM-DD (in business TZ). default: today in TZ
+    const fromStr = String(req.query.from || "");
+    const windowStartZ = fromStr
+      ? DateTime.fromISO(fromStr, { zone: tz }).startOf("day")
+      : DateTime.now().setZone(tz).startOf("day");
+
+    if (!windowStartZ.isValid) {
+      return res.status(400).json({ ok: false, error: "Bad from date (use YYYY-MM-DD)" });
+    }
+
+    const windowEndZ = windowStartZ.plus({ days });
+    const timeMinUtc = windowStartZ.toUTC().toISO();
+    const timeMaxUtc = windowEndZ.toUTC().toISO();
+
+    // Google freebusy
+    const oauth2Client = makeOAuthClient();
+    await loadTokensIntoClientForBusiness(db, oauth2Client, businessId);
+
+    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+
+    const fb = await calendar.freebusy.query({
+      requestBody: {
+        timeMin: timeMinUtc,
+        timeMax: timeMaxUtc,
+        timeZone: "UTC",
+        items: [{ id: "primary" }],
+      },
+    });
+
+    const busy = fb?.data?.calendars?.primary?.busy || [];
+    const busyMergedUtc = normalizeBusyUtc(
+      busy,
+      Number(business.buffer_before_min || 0),
+      Number(business.buffer_after_min || 0)
+    );
+
+    const slots = generateSlots({
+      business,
+      windowStartDate: windowStartZ,
+      days,
+      durationMin,
+      busyMergedUtc,
+    });
+
+    res.json({
+      ok: true,
+      businessId,
+      timezone: tz,
+      from_local: windowStartZ.toISODate(),
+      days,
+      durationMin,
+      count: slots.length,
+      slots,
+    });
+  } catch (e) {
+    console.error("available-slots error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 // --------------------
 // Twilio voice webhook
 // --------------------
