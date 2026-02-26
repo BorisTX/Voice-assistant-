@@ -552,16 +552,17 @@ let data;  // data layer
 async function start() {
   console.log("Starting server...");
 
-  // 1) open db + migrations
+  // init sqlite + migrations
   db = openDb();
   await runMigrations(db);
 
-  // 2) init data layer ONCE
-  const layer = makeDataLayer({ db });
-  data = layer.data;
+  // init data layer (sqlite now, later postgres)
+  const dl = makeDataLayer({ db });
+  data = dl.data;
 
+  console.log("DB_DIALECT =", dl.dialect);
+  console.log("✅ Data layer ready");
   console.log("✅ Migrations completed");
-  console.log("✅ Data layer ready. dialect =", layer.dialect);
 
   server.listen(PORT, () => {
     console.log("Voice assistant is running 🚀 on port", PORT);
