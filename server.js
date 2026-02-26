@@ -7,9 +7,10 @@ import WebSocket, { WebSocketServer } from "ws";
 import crypto from "crypto";
 import { google } from "googleapis";
 import { DateTime } from "luxon";
+
 import { normalizeBusyUtc, generateSlots } from "./src/slots.js";
-import { getBusinessById } from "./db.js";
 import { openDb, runMigrations } from "./src/db/migrate.js";
+import { makeDataLayer } from "./src/data/index.js";
 
 import {
   makeOAuthClient,
@@ -17,13 +18,6 @@ import {
   loadTokensIntoClientForBusiness,
   exchangeCodeAndStoreForBusiness,
 } from "./googleAuth.js";
-import {
-  getBusinessByName,
-  insertBusiness,
-  listBusinesses,
-  listTables,
-  getGoogleTokens,
-} from "./db.js";
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -34,7 +28,8 @@ app.use((req, res, next) => {
   next();
 });
 
-let db; // single DB connection for the whole process
+let db;     // raw sqlite connection (сейчас)
+let data;   // data layer (sqlite сейчас, позже postgres)
 
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
@@ -45,7 +40,7 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 app.get("/debug/db", async (req, res) => {
   try {
     if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
-    const tables = await listTables(db);
+    const tables = await data.listTables();
     res.json({ ok: true, tables });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -55,7 +50,7 @@ app.get("/debug/db", async (req, res) => {
 app.get("/debug/businesses", async (req, res) => {
   try {
     if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
-    const businesses = await listBusinesses(db);
+    const businesses = await data.listBusinesses();
     res.json({ ok: true, count: businesses.length, businesses });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -72,7 +67,7 @@ app.get("/debug/create-default-business", async (req, res) => {
 
     const name = "Default HVAC (DFW)";
 
-    const existing = await getBusinessByName(db, name);
+    const existing = await data.getBusinessByName(name);
     if (existing) {
       return res.json({ ok: true, created: false, businessId: existing.id, business: existing });
     }
@@ -91,7 +86,7 @@ app.get("/debug/create-default-business", async (req, res) => {
 
     const emergencyKeywords = ["no heat", "no cooling", "gas smell", "water leak", "flooding"];
 
-    await insertBusiness(db, {
+    await data.insertBusiness({
       id: businessId,
       name,
       industry: "hvac",
@@ -117,17 +112,13 @@ app.get("/debug/create-default-business", async (req, res) => {
 // --------------------
 // OAuth (Business-only)
 // --------------------
-/**
- * Start OAuth for business:
- * GET /auth/google-business?business_id=<uuid>
- */
 app.get("/auth/google-business", async (req, res) => {
   try {
     if (!db) return res.status(500).send("DB not ready yet");
     const businessId = String(req.query.business_id || "");
     if (!businessId) return res.status(400).send("Missing business_id");
 
-    const oauth2Client = makeOAuthClient(); // IMPORTANT: fresh instance
+    const oauth2Client = makeOAuthClient(); // fresh instance
     const url = await getAuthUrlForBusiness(db, oauth2Client, businessId);
     return res.redirect(url);
   } catch (e) {
@@ -136,10 +127,6 @@ app.get("/auth/google-business", async (req, res) => {
   }
 });
 
-/**
- * OAuth callback (business routed by `state`)
- * GET /auth/google/callback?code=...&state=<businessId>
- */
 app.get("/auth/google/callback", async (req, res) => {
   try {
     if (!db) return res.status(500).send("DB not ready yet");
@@ -149,7 +136,7 @@ app.get("/auth/google/callback", async (req, res) => {
     if (!code) return res.status(400).send("Missing code");
     if (!businessId) return res.status(400).send("Missing state (business_id)");
 
-    const oauth2Client = makeOAuthClient(); // IMPORTANT: fresh instance
+    const oauth2Client = makeOAuthClient(); // fresh instance
     await exchangeCodeAndStoreForBusiness(db, oauth2Client, code, businessId);
 
     return res.status(200).send("Business Google Calendar connected ✅");
@@ -169,7 +156,7 @@ app.get("/debug/tokens-business", async (req, res) => {
     const businessId = String(req.query.business_id || "");
     if (!businessId) return res.status(400).json({ ok: false, error: "Missing business_id" });
 
-    const row = await getGoogleTokens(db, businessId);
+    const row = await data.getGoogleTokens(businessId);
     res.json({
       ok: true,
       businessId,
@@ -191,7 +178,7 @@ app.get("/debug/calendar-business", async (req, res) => {
     const businessId = String(req.query.business_id || "");
     if (!businessId) return res.status(400).json({ ok: false, error: "Missing business_id" });
 
-    const oauth2Client = makeOAuthClient(); // fresh instance per request
+    const oauth2Client = makeOAuthClient();
     await loadTokensIntoClientForBusiness(db, oauth2Client, businessId);
 
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
@@ -219,6 +206,10 @@ app.get("/debug/calendar-business", async (req, res) => {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
+// --------------------
+// Slots API
+// --------------------
 app.get("/api/available-slots", async (req, res) => {
   try {
     if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
@@ -226,16 +217,18 @@ app.get("/api/available-slots", async (req, res) => {
     const businessId = String(req.query.business_id || "");
     if (!businessId) return res.status(400).json({ ok: false, error: "Missing business_id" });
 
-    const business = await getBusinessById(db, businessId);
+    const business = await data.getBusinessById(businessId);
     if (!business) return res.status(404).json({ ok: false, error: "Business not found" });
 
     const tz = business.timezone || "America/Chicago";
 
-    const durationMin = req.query.duration_min ? Number(req.query.duration_min) : Number(business.default_duration_min || 60);
+    const durationMin = req.query.duration_min
+      ? Number(req.query.duration_min)
+      : Number(business.default_duration_min || 60);
+
     const daysReq = req.query.days ? Number(req.query.days) : Number(business.max_days_ahead || 7);
     const days = Math.max(1, Math.min(daysReq, Number(business.max_days_ahead || 7)));
 
-    // from=YYYY-MM-DD (in business TZ). default: today in TZ
     const fromStr = String(req.query.from || "");
     const windowStartZ = fromStr
       ? DateTime.fromISO(fromStr, { zone: tz }).startOf("day")
@@ -294,16 +287,15 @@ app.get("/api/available-slots", async (req, res) => {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
 // --------------------
 // Twilio voice webhook
 // --------------------
-// Browser test (GET)
 app.get("/voice", (req, res) => {
   console.log("GET /voice browser test");
   res.status(200).send("VOICE OK (GET)");
 });
 
-// Twilio webhook (POST) -> TwiML with Media Stream
 app.post("/voice", (req, res) => {
   console.log("POST /voice from Twilio");
 
@@ -321,7 +313,6 @@ app.post("/voice", (req, res) => {
   res.type("text/xml").send(twiml);
 });
 
-// 404 logger (AFTER all routes)
 app.use((req, res) => {
   console.log("404:", req.method, req.url);
   res.status(404).send("Not Found");
@@ -340,49 +331,38 @@ wss.on("connection", (twilioWs) => {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     console.error("OPENAI_API_KEY is missing in environment variables!");
-    try {
-      twilioWs.close();
-    } catch {}
+    try { twilioWs.close(); } catch {}
     return;
   }
 
-  // OpenAI Realtime WebSocket
   const openaiWs = new WebSocket("wss://api.openai.com/v1/realtime?model=gpt-realtime", {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers: { Authorization: `Bearer ${apiKey}` },
   });
 
   openaiWs.on("open", () => {
     console.log("Connected to OpenAI");
 
-    // IMPORTANT: Use g711_ulaw in/out so Twilio can play it directly (no conversion)
-    openaiWs.send(
-      JSON.stringify({
-        type: "session.update",
-        session: {
-          type: "realtime",
-          audio: {
-            input: { format: "g711_ulaw" },
-            output: { format: "g711_ulaw", voice: "alloy" },
-          },
-          instructions:
-            "You are a friendly HVAC assistant in Dallas-Fort Worth. " +
-            "Ask briefly for name, phone, address, issue, and preferred time.",
+    openaiWs.send(JSON.stringify({
+      type: "session.update",
+      session: {
+        type: "realtime",
+        audio: {
+          input: { format: "g711_ulaw" },
+          output: { format: "g711_ulaw", voice: "alloy" },
         },
-      })
-    );
+        instructions:
+          "You are a friendly HVAC assistant in Dallas-Fort Worth. " +
+          "Ask briefly for name, phone, address, issue, and preferred time.",
+      },
+    }));
 
-    // Make assistant speak first
-    openaiWs.send(
-      JSON.stringify({
-        type: "response.create",
-        response: {
-          instructions:
-            "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?",
-        },
-      })
-    );
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        instructions:
+          "Say: Hi! This is the HVAC assistant. Is this an emergency or would you like to schedule service?",
+      },
+    }));
   });
 
   openaiWs.on("close", (code, reason) => {
@@ -393,15 +373,9 @@ wss.on("connection", (twilioWs) => {
     console.error("OpenAI WS error:", err);
   });
 
-  // Twilio -> OpenAI
   twilioWs.on("message", (message) => {
     let msg;
-    try {
-      msg = JSON.parse(message.toString());
-    } catch {
-      console.log("Bad JSON from Twilio");
-      return;
-    }
+    try { msg = JSON.parse(message.toString()); } catch { return; }
 
     if (msg.event === "start") {
       streamSid = msg.start?.streamSid;
@@ -411,59 +385,45 @@ wss.on("connection", (twilioWs) => {
 
     if (msg.event === "media" && msg.media?.payload) {
       if (openaiWs.readyState === WebSocket.OPEN) {
-        openaiWs.send(
-          JSON.stringify({
-            type: "input_audio_buffer.append",
-            audio: msg.media.payload, // already base64 g711_ulaw
-          })
-        );
+        openaiWs.send(JSON.stringify({
+          type: "input_audio_buffer.append",
+          audio: msg.media.payload,
+        }));
       }
       return;
     }
 
     if (msg.event === "stop") {
       console.log("Stream stopped");
-      try {
-        openaiWs.close();
-      } catch {}
+      try { openaiWs.close(); } catch {}
       return;
     }
   });
 
-  // OpenAI -> Twilio (g711_ulaw passthrough)
   openaiWs.on("message", (data) => {
     let msg;
-    try {
-      msg = JSON.parse(data.toString());
-    } catch {
-      return;
-    }
+    try { msg = JSON.parse(data.toString()); } catch { return; }
 
     if (msg.type === "response.output_audio.delta" && msg.delta) {
       if (!streamSid) return;
-
-      twilioWs.send(
-        JSON.stringify({
-          event: "media",
-          streamSid,
-          media: { payload: msg.delta }, // already base64 g711_ulaw
-        })
-      );
+      twilioWs.send(JSON.stringify({
+        event: "media",
+        streamSid,
+        media: { payload: msg.delta },
+      }));
     }
   });
 
   twilioWs.on("close", () => {
     console.log("Twilio disconnected");
-    try {
-      openaiWs.close();
-    } catch {}
+    try { openaiWs.close(); } catch {}
   });
 });
 
 // --------------------
 // Startup
 // --------------------
-const port = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 async function start() {
   console.log("Starting server...");
@@ -472,8 +432,12 @@ async function start() {
   await runMigrations(db);
   console.log("✅ Migrations completed");
 
-  server.listen(port, () => {
-    console.log("Voice assistant is running 🚀 on port", port);
+  const layer = makeDataLayer({ db });
+  data = layer.data;
+  console.log("✅ Data layer ready. dialect =", layer.dialect);
+
+  server.listen(PORT, () => {
+    console.log("Voice assistant is running 🚀 on port", PORT);
   });
 }
 
