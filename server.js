@@ -128,8 +128,12 @@ app.get("/auth/google-business", async (req, res) => {
     const businessId = String(req.query.business_id || "");
     if (!businessId) return res.status(400).send("Missing business_id");
 
+    // hard check: business must exist
+    const exists = await getBusinessById(db, businessId);
+    if (!exists) return res.status(404).send("Business not found: " + businessId);
+
     const oauth2Client = makeOAuthClient(); // fresh instance
-    const url = getAuthUrlForBusiness(oauth2Client, businessId);
+    const url = await getAuthUrlForBusiness(db, oauth2Client, businessId);
     return res.redirect(url);
   } catch (e) {
     console.error("ERROR in /auth/google-business:", e);
@@ -147,6 +151,9 @@ app.get("/auth/google/callback", async (req, res) => {
     if (!businessId) return res.status(400).send("Missing state (business_id)");
 
     const oauth2Client = makeOAuthClient(); // fresh instance
+    // hard check: business must exist
+const exists = await getBusinessById(db, businessId);
+if (!exists) return res.status(404).send("Business not found: " + businessId);
     await exchangeCodeAndStoreForBusiness(db, oauth2Client, code, businessId);
 
     return res.status(200).send("Business Google Calendar connected ✅");
@@ -540,11 +547,12 @@ await runMigrations(db);
 data = makeDataLayer({ db });
 console.log("✅ Data layer ready");
   console.log("✅ Migrations completed");
-
+  // init data layer (sqlite now; later postgres)
   const layer = makeDataLayer({ db });
   data = layer.data;
-  console.log("✅ Data layer ready. dialect =", layer.dialect);
 
+  console.log("DB_DIALECT =", layer.dialect);
+  console.log("✅ Data layer ready. dialect =", layer.dialect);
   server.listen(PORT, () => {
     console.log("Voice assistant is running 🚀 on port", PORT);
   });
