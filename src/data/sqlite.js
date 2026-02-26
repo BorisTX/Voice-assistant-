@@ -1,25 +1,37 @@
 // src/data/sqlite.js
 import {
+  // businesses
   getBusinessById,
   getBusinessByName,
-  insertBusiness,
   listBusinesses,
-  listTables,
+  insertBusiness,
+
+  // tokens
   getGoogleTokens,
+  upsertGoogleTokens,
+  assertBusinessExists,
+
+  // debug
+  listTables,
 } from "../../db.js";
 
+// адаптер: превращаем функции вида (db, ...) в методы data-layer вида (...) с замкнутым db
 export function makeSqliteData(db) {
+  if (!db) throw new Error("makeSqliteData: missing db");
+
   return {
-    // db inspection
+    // debug
     listTables: () => listTables(db),
-    listBusinesses: () => listBusinesses(db),
 
     // businesses
-    getBusinessById: (id) => getBusinessById(db, id),
+    getBusinessById: (businessId) => getBusinessById(db, businessId),
     getBusinessByName: (name) => getBusinessByName(db, name),
-    insertBusiness: (payload) => insertBusiness(db, payload),
+    listBusinesses: () => listBusinesses(db),
+    insertBusiness: (business) => insertBusiness(db, business),
 
-    // tokens
+    // tokens (важно для googleAuth.js)
     getGoogleTokens: (businessId) => getGoogleTokens(db, businessId),
+    upsertGoogleTokens: (businessId, tokens) => upsertGoogleTokens(db, businessId, tokens),
+    assertBusinessExists: (businessId) => assertBusinessExists(db, businessId),
   };
 }
