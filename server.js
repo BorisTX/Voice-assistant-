@@ -256,7 +256,103 @@ app.get("/api/available-slots", async (req, res) => {
         items: [{ id: "primary" }],
       },
     });
+app.post("/api/book", async (req, res) => {
+  try {
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
+    const {
+      business_id,
+      start_local,
+      duration_min,
+      customer_name,
+      customer_phone,
+      customer_email,
+      address,
+      job_summary,
+    } = req.body || {};
+
+    if (!business_id) return res.status(400).json({ ok: false, error: "Missing business_id" });
+    if (!start_local) return res.status(400).json({ ok: false, error: "Missing start_local" });
+
+    const business = await data.getBusinessById(business_id);
+    if (!business) return res.status(404).json({ ok: false, error: "Business not found" });
+
+    const tz = business.timezone || "America/Chicago";
+    const durMin = Number(duration_min || business.default_duration_min || 60);
+
+    const startZ = DateTime.fromISO(start_local, { zone: tz });
+    if (!startZ.isValid) {
+      return res.status(400).json({ ok: false, error: "Bad start_local" });
+    }
+
+    const endZ = startZ.plus({ minutes: durMin });
+    const startUtc = startZ.toUTC().toISO();
+    const endUtc = endZ.toUTC().toISO();
+
+    // cleanup expired holds
+    await data.cleanupExpiredHolds(business_id);
+
+    // DB overlap check
+    const overlaps = await data.findOverlappingActiveBookings(
+      business_id,
+      startUtc,
+      endUtc
+    );
+
+    if (overlaps.length > 0) {
+      return res.status(409).json({ ok: false, error: "Slot already taken" });
+    }
+
+    const bookingId = crypto.randomUUID();
+
+    const holdExpiresUtc = DateTime.utc().plus({ minutes: 5 }).toISO();
+
+    await data.createPendingHold({
+      id: bookingId,
+      business_id,
+      start_utc: startUtc,
+      end_utc: endUtc,
+      hold_expires_at_utc: holdExpiresUtc,
+      customer_name,
+      customer_phone,
+      customer_email,
+      job_summary: job_summary || (address ? `Address: ${address}` : null),
+    });
+
+    // Google revalidate + create
+    const oauth2Client = makeOAuthClient();
+    await loadTokensIntoClientForBusiness(data, oauth2Client, business_id);
+
+    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+
+    const created = await calendar.events.insert({
+      calendarId: "primary",
+      requestBody: {
+        summary: job_summary || "HVAC Service",
+        description: [
+          customer_name ? `Name: ${customer_name}` : null,
+          customer_phone ? `Phone: ${customer_phone}` : null,
+          customer_email ? `Email: ${customer_email}` : null,
+          address ? `Address: ${address}` : null,
+        ].filter(Boolean).join("\n"),
+        start: { dateTime: startZ.toISO(), timeZone: tz },
+        end: { dateTime: endZ.toISO(), timeZone: tz },
+      },
+    });
+
+    await data.confirmBooking(bookingId, created.data.id);
+
+    return res.json({
+      ok: true,
+      bookingId,
+      status: "confirmed",
+      gcal_event_id: created.data.id,
+    });
+  } catch (e) {
+    console.error("Booking error:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
     const busy = fb?.data?.calendars?.primary?.busy || [];
     const busyMergedUtc = normalizeBusyUtc(
       busy,
@@ -429,7 +525,10 @@ async function start() {
   console.log("Starting server...");
 
   db = openDb();
-  await runMigrations(db);
+await runMigrations(db);
+
+data = makeDataLayer({ db });
+console.log("✅ Data layer ready");
   console.log("✅ Migrations completed");
 
   const layer = makeDataLayer({ db });
