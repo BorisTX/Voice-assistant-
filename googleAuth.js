@@ -1,7 +1,11 @@
 // src/googleAuth.js
 import { google } from "googleapis";
-import { getTokens as dbGetTokens, saveTokens as dbSaveTokens } from "./db.js";
-
+import {
+  getTokens as dbGetTokens,
+  saveTokens as dbSaveTokens,
+  getGoogleTokens,
+  upsertGoogleTokens,
+} from "./db.js";
 // Для MVP: полный доступ к календарю.
 // Позже можно сузить до: "https://www.googleapis.com/auth/calendar.events"
 const SCOPES = ["https://www.googleapis.com/auth/calendar"];
