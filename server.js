@@ -124,16 +124,19 @@ app.get("/debug/create-default-business", async (req, res) => {
 // --------------------
 app.get("/auth/google-business", async (req, res) => {
   try {
-    if (!db) return res.status(500).send("DB not ready yet");
+    if (!data) return res.status(500).send("Data layer not ready");
+
     const businessId = String(req.query.business_id || "");
     if (!businessId) return res.status(400).send("Missing business_id");
 
-    // hard check: business must exist
-    const exists = await getBusinessById(db, businessId);
-    if (!exists) return res.status(404).send("Business not found: " + businessId);
+    const oauth2Client = makeOAuthClient();
 
-    const oauth2Client = makeOAuthClient(); // fresh instance
-    const url = await getAuthUrlForBusiness(db, oauth2Client, businessId);
+    const url = await getAuthUrlForBusiness(
+      data,
+      oauth2Client,
+      businessId
+    );
+
     return res.redirect(url);
   } catch (e) {
     console.error("ERROR in /auth/google-business:", e);
@@ -143,20 +146,24 @@ app.get("/auth/google-business", async (req, res) => {
 
 app.get("/auth/google/callback", async (req, res) => {
   try {
-    if (!db) return res.status(500).send("DB not ready yet");
+    if (!data) return res.status(500).send("Data layer not ready");
 
     const code = String(req.query.code || "");
     const businessId = String(req.query.state || "");
+
     if (!code) return res.status(400).send("Missing code");
-    if (!businessId) return res.status(400).send("Missing state (business_id)");
+    if (!businessId) return res.status(400).send("Missing state");
 
-    const oauth2Client = makeOAuthClient(); // fresh instance
-    // hard check: business must exist
-const exists = await getBusinessById(db, businessId);
-if (!exists) return res.status(404).send("Business not found: " + businessId);
-    await exchangeCodeAndStoreForBusiness(db, oauth2Client, code, businessId);
+    const oauth2Client = makeOAuthClient();
 
-    return res.status(200).send("Business Google Calendar connected ✅");
+    await exchangeCodeAndStoreForBusiness(
+      data,
+      oauth2Client,
+      code,
+      businessId
+    );
+
+    return res.send("Business Google Calendar connected ✅");
   } catch (e) {
     console.error("OAuth callback error:", e);
     return res.status(500).send("OAuth failed: " + String(e?.message || e));
@@ -168,12 +175,13 @@ if (!exists) return res.status(404).send("Business not found: " + businessId);
 // --------------------
 app.get("/debug/tokens-business", async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
     const businessId = String(req.query.business_id || "");
     if (!businessId) return res.status(400).json({ ok: false, error: "Missing business_id" });
 
     const row = await data.getGoogleTokens(businessId);
+
     res.json({
       ok: true,
       businessId,
@@ -544,11 +552,14 @@ async function start() {
   db = openDb();
 await runMigrations(db);
 
-data = makeDataLayer({ db });
+const dl = makeDataLayer({ db });
+data = dl.data;
+
+console.log("DB_DIALECT =", dl.dialect);
 console.log("✅ Data layer ready");
   console.log("✅ Migrations completed");
   // init data layer (sqlite now; later postgres)
-  const layer = makeDataLayer({ db });
+  
   data = layer.data;
 
   console.log("DB_DIALECT =", layer.dialect);
