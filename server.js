@@ -4,7 +4,15 @@ import WebSocket, { WebSocketServer } from "ws";
 import { getTokens } from "./db.js";
 import { google } from "googleapis";
 //import { initDb } from "./db.js";
-import { makeOAuthClient, getAuthUrl, loadTokensIntoClient, exchangeCodeAndStore } from "./googleAuth.js";
+import {
+  makeOAuthClient,
+  getAuthUrl,
+  loadTokensIntoClient,
+  exchangeCodeAndStore,
+  getAuthUrlForBusiness,
+  loadTokensIntoClientForBusiness,
+  exchangeCodeAndStoreForBusiness,
+} from "./googleAuth.js";
 import { openDb, runMigrations } from "./src/db/migrate.js";
 import crypto from "crypto"; // <-- ВАЖНО: если у тебя вверху нет crypto, добавь импорт
 let db; // будет глобальным, чтобы эндпоинты могли использовать одну БД
