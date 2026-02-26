@@ -1,6 +1,8 @@
-// src/googleAuth.js
+// googleAuth.js
 import { google } from "googleapis";
+import { getGoogleTokens, upsertGoogleTokens } from "./db.js";
 
+// Для MVP: полный доступ к календарю
 const SCOPES = ["https://www.googleapis.com/auth/calendar"];
 
 export function makeOAuthClient() {
@@ -25,7 +27,7 @@ export function getAuthUrlForBusiness(oauth2Client, businessId) {
 }
 
 export async function loadTokensIntoClientForBusiness(db, oauth2Client, businessId) {
-  const row = await db.getGoogleTokens(businessId);
+  const row = await getGoogleTokens(db, businessId);
   if (!row || !row.access_token) throw new Error("No tokens for this business");
 
   const expiryMs = row.expiry_date_utc ? Date.parse(row.expiry_date_utc) : undefined;
@@ -44,13 +46,14 @@ export async function loadTokensIntoClientForBusiness(db, oauth2Client, business
 export async function exchangeCodeAndStoreForBusiness(db, oauth2Client, code, businessId) {
   const { tokens } = await oauth2Client.getToken(code);
 
-  await db.upsertGoogleTokens(businessId, tokens);
+  await upsertGoogleTokens(db, businessId, tokens);
+
   oauth2Client.setCredentials(tokens);
 
   oauth2Client.removeAllListeners("tokens");
   oauth2Client.on("tokens", async (newTokens) => {
     try {
-      await db.upsertGoogleTokens(businessId, newTokens);
+      await upsertGoogleTokens(db, businessId, newTokens);
     } catch (e) {
       console.error("Failed to save refreshed tokens (business):", e);
     }
