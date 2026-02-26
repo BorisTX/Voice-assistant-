@@ -119,7 +119,7 @@ app.get("/auth/google-business", async (req, res) => {
     if (!businessId) return res.status(400).send("Missing business_id");
 
     const oauth2Client = makeOAuthClient(); // fresh instance
-    const url = await getAuthUrlForBusiness(db, oauth2Client, businessId);
+    const url = getAuthUrlForBusiness(oauth2Client, businessId);
     return res.redirect(url);
   } catch (e) {
     console.error("ERROR in /auth/google-business:", e);
