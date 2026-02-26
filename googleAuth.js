@@ -1,13 +1,13 @@
 // src/googleAuth.js
 import { google } from "googleapis";
 import {
-  getTokens as dbGetTokens,
-  saveTokens as dbSaveTokens,
+  assertBusinessExists,
   getGoogleTokens,
   upsertGoogleTokens,
 } from "./db.js";
-// Для MVP: полный доступ к календарю.
-// Позже можно сузить до: "https://www.googleapis.com/auth/calendar.events"
+
+// Full calendar access for MVP.
+// Later you can narrow to: https://www.googleapis.com/auth/calendar.events
 const SCOPES = ["https://www.googleapis.com/auth/calendar"];
 
 export function makeOAuthClient() {
@@ -22,69 +22,36 @@ export function makeOAuthClient() {
   return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 }
 
-export function getAuthUrl(oauth2Client) {
-  // prompt=consent + access_type=offline -> чтобы гарантированно получить refresh_token
+/**
+ * Generates OAuth URL for a specific business.
+ * We pass businessId in `state` so callback can route tokens correctly.
+ */
+export async function getAuthUrlForBusiness(db, oauth2Client, businessId) {
+  if (!businessId) throw new Error("Missing businessId");
+  await assertBusinessExists(db, businessId);
+
   return oauth2Client.generateAuthUrl({
     access_type: "offline",
-    prompt: "consent",
+    prompt: "consent", // ensures refresh_token on first consent (and on re-consent)
     scope: SCOPES,
+    state: businessId,
   });
 }
 
-export async function loadTokensIntoClient(oauth2Client) {
-  const row = await dbGetTokens();
+/**
+ * Loads tokens for business into the provided OAuth client.
+ * IMPORTANT: do NOT reuse the same oauth2Client across different businesses concurrently.
+ * Create a fresh client per request/flow.
+ */
+export async function loadTokensIntoClientForBusiness(db, oauth2Client, businessId) {
+  if (!businessId) throw new Error("Missing businessId");
+  await assertBusinessExists(db, businessId);
 
-  if (!row || !row.access_token) {
-    throw new Error("No tokens in DB");
-  }
-
-  oauth2Client.setCredentials({
-    access_token: row.access_token,
-    refresh_token: row.refresh_token || undefined,
-    scope: row.scope || undefined,
-    token_type: row.token_type || undefined,
-    expiry_date: row.expiry_date || undefined,
-  });
-
-  return row;
-}
-
-export async function exchangeCodeAndStore(oauth2Client, code) {
-  const { tokens } = await oauth2Client.getToken(code);
-
-  // сохраняем то, что пришло (может прийти refresh_token только 1 раз)
-  await dbSaveTokens(tokens);
-
-  oauth2Client.setCredentials(tokens);
-
-  // если Google обновит токены позже (refresh), сохраним в DB
-  oauth2Client.removeAllListeners("tokens");
-  oauth2Client.on("tokens", async (newTokens) => {
-    try {
-      await dbSaveTokens(newTokens);
-    } catch (e) {
-      console.error("Failed to save refreshed tokens:", e);
-    }
-  });
-
-  return tokens;
-}
-export function getAuthUrlForBusiness(oauth2Client, businessId) {
-  return oauth2Client.generateAuthUrl({
-    access_type: "offline",
-    prompt: "consent",
-    scope: SCOPES,
-    state: businessId, // важно: пронесём businessId через callback
-  });
-}
-
-export async function loadTokensIntoClientForBusiness(oauth2Client, businessId) {
-  const row = await getGoogleTokens(businessId);
+  const row = await getGoogleTokens(db, businessId);
   if (!row || !row.access_token) {
     throw new Error("No tokens for this business");
   }
 
-  // expiry_date_utc мы храним ISO string -> переводим в ms
   const expiryMs = row.expiry_date_utc ? Date.parse(row.expiry_date_utc) : undefined;
 
   oauth2Client.setCredentials({
@@ -98,17 +65,26 @@ export async function loadTokensIntoClientForBusiness(oauth2Client, businessId) 
   return row;
 }
 
-export async function exchangeCodeAndStoreForBusiness(oauth2Client, code, businessId) {
+/**
+ * Exchanges auth code and stores tokens for the given business.
+ * Also installs a safe tokens listener that persists refreshes *for this business*.
+ * NOTE: This is safe ONLY if you use a dedicated oauth2Client instance per business flow.
+ */
+export async function exchangeCodeAndStoreForBusiness(db, oauth2Client, code, businessId) {
+  if (!code) throw new Error("Missing code");
+  if (!businessId) throw new Error("Missing businessId");
+  await assertBusinessExists(db, businessId);
+
   const { tokens } = await oauth2Client.getToken(code);
 
-  await upsertGoogleTokens(businessId, tokens);
-
+  await upsertGoogleTokens(db, businessId, tokens);
   oauth2Client.setCredentials(tokens);
-  
-oauth2Client.removeAllListeners("tokens");
+
+  // Persist future refreshes for THIS business.
+  // Do NOT call removeAllListeners here (it can break other flows if you ever reuse the client).
   oauth2Client.on("tokens", async (newTokens) => {
     try {
-      await upsertGoogleTokens(businessId, newTokens);
+      await upsertGoogleTokens(db, businessId, newTokens);
     } catch (e) {
       console.error("Failed to save refreshed tokens (business):", e);
     }
