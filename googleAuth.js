@@ -2,7 +2,6 @@
 import { google } from "googleapis";
 import { getGoogleTokens, upsertGoogleTokens } from "./db.js";
 
-// Для MVP: полный доступ к календарю
 const SCOPES = ["https://www.googleapis.com/auth/calendar"];
 
 export function makeOAuthClient() {
