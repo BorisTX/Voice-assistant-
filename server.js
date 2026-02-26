@@ -7,13 +7,13 @@ import WebSocket, { WebSocketServer } from "ws";
 import crypto from "crypto";
 import { google } from "googleapis";
 
-import { openDb, runMigrations } from "./src/db/migrate.js";
+import { openDb, runMigrations } from "./db/migrate.js";
 import {
   makeOAuthClient,
   getAuthUrlForBusiness,
   loadTokensIntoClientForBusiness,
   exchangeCodeAndStoreForBusiness,
-} from "./src/googleAuth.js";
+} from "./googleAuth.js";
 import {
   getBusinessByName,
   insertBusiness,
