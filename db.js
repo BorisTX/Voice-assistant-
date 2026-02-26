@@ -116,3 +116,17 @@ export function upsertGoogleTokens(businessId, tokens) {
     );
   });
 }
+export function getGoogleTokens(businessId) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT business_id, access_token, refresh_token, scope, token_type, expiry_date_utc, updated_at_utc
+       FROM google_tokens
+       WHERE business_id = ?`,
+      [businessId],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve(row || null);
+      }
+    );
+  });
+}
