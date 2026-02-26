@@ -549,21 +549,17 @@ const PORT = process.env.PORT || 10000;
 async function start() {
   console.log("Starting server...");
 
+  // 1) open raw sqlite connection
   db = openDb();
-await runMigrations(db);
+  await runMigrations(db);
 
-const dl = makeDataLayer({ db });
-data = dl.data;
-
-console.log("DB_DIALECT =", dl.dialect);
-console.log("✅ Data layer ready");
-  console.log("✅ Migrations completed");
-  // init data layer (sqlite now; later postgres)
-  
+  // 2) build data layer (sqlite now, later postgres)
+  const layer = makeDataLayer({ db });
   data = layer.data;
 
-  console.log("DB_DIALECT =", layer.dialect);
+  console.log("✅ Migrations completed");
   console.log("✅ Data layer ready. dialect =", layer.dialect);
+
   server.listen(PORT, () => {
     console.log("Voice assistant is running 🚀 on port", PORT);
   });
