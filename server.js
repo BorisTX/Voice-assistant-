@@ -136,25 +136,6 @@ app.get("/debug/tokens", async (req, res) => {
 });
 // ...
 
-
-    const items = out.data.items || [];
-    res.json({
-      ok: true,
-      count: items.length,
-      next10: items.map((e) => ({
-        id: e.id,
-        summary: e.summary,
-        start: e.start?.dateTime || e.start?.date,
-      })),
-    });
-  } catch (err) {
-    console.error("DEBUG /calendar error:", err);
-    res.status(500).json({
-      ok: false,
-      error: err?.message || String(err),
-    });
-  }
-});
 // Twilio webhook → returns TwiML with Media Stream
 // Browser test (GET)
 app.get("/voice", (req, res) => {
@@ -203,7 +184,6 @@ app.get("/debug/calendar", async (req, res) => {
     console.error("DEBUG calendar error:", e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
-});
 });
 // Twilio webhook (POST)
 app.post("/voice", (req, res) => {
