@@ -36,8 +36,6 @@ app.use((req, res, next) => {
   next();
 });
 
-let db;     // raw sqlite connection (сейчас)
-let data;   // data layer (sqlite сейчас, позже postgres)
 
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
