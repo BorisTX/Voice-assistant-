@@ -195,3 +195,169 @@ export async function listTables(db) {
   );
   return rows.map((r) => r.name);
 }
+// --- bookings (holds + confirm) ---
+
+export async function cleanupExpiredHolds(db, businessId = null) {
+  const now = new Date().toISOString();
+  if (businessId) {
+    await run(
+      db,
+      `
+      UPDATE bookings
+      SET status = 'cancelled', updated_at_utc = ?
+      WHERE business_id = ?
+        AND status = 'pending'
+        AND hold_expires_at_utc IS NOT NULL
+        AND hold_expires_at_utc <= ?
+      `,
+      [now, businessId, now]
+    );
+    return true;
+  }
+
+  await run(
+    db,
+    `
+    UPDATE bookings
+    SET status = 'cancelled', updated_at_utc = ?
+    WHERE status = 'pending'
+      AND hold_expires_at_utc IS NOT NULL
+      AND hold_expires_at_utc <= ?
+    `,
+    [now, now]
+  );
+  return true;
+}
+
+export async function findOverlappingActiveBookings(db, businessId, startUtcIso, endUtcIso) {
+  const now = new Date().toISOString();
+  // overlap rule: existing.start < new.end AND existing.end > new.start
+  // pending holds count only if not expired
+  return all(
+    db,
+    `
+    SELECT id, status, start_utc, end_utc, hold_expires_at_utc
+    FROM bookings
+    WHERE business_id = ?
+      AND (
+        status = 'confirmed'
+        OR (status = 'pending' AND (hold_expires_at_utc IS NULL OR hold_expires_at_utc > ?))
+      )
+      AND start_utc < ?
+      AND end_utc > ?
+    ORDER BY start_utc ASC
+    LIMIT 10
+    `,
+    [businessId, now, endUtcIso, startUtcIso]
+  );
+}
+
+export async function createPendingHold(db, payload) {
+  const now = new Date().toISOString();
+  const {
+    id,
+    business_id,
+    start_utc,
+    end_utc,
+    hold_expires_at_utc,
+    customer_name = null,
+    customer_phone = null,
+    customer_email = null,
+    job_summary = null,
+  } = payload;
+
+  if (!id) throw new Error("createPendingHold: missing id");
+  if (!business_id) throw new Error("createPendingHold: missing business_id");
+  if (!start_utc || !end_utc) throw new Error("createPendingHold: missing start/end");
+
+  await run(
+    db,
+    `
+    INSERT INTO bookings (
+      id, business_id,
+      start_utc, end_utc,
+      status, hold_expires_at_utc,
+      customer_name, customer_phone, customer_email,
+      job_summary,
+      gcal_event_id,
+      created_at_utc, updated_at_utc
+    ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, ?, ?)
+    `,
+    [
+      id,
+      business_id,
+      start_utc,
+      end_utc,
+      hold_expires_at_utc,
+      customer_name,
+      customer_phone,
+      customer_email,
+      job_summary,
+      now,
+      now,
+    ]
+  );
+
+  return true;
+}
+
+export async function confirmBooking(db, bookingId, gcalEventId) {
+  const now = new Date().toISOString();
+  await run(
+    db,
+    `
+    UPDATE bookings
+    SET status='confirmed',
+        hold_expires_at_utc=NULL,
+        gcal_event_id=?,
+        updated_at_utc=?
+    WHERE id=?
+    `,
+    [gcalEventId || null, now, bookingId]
+  );
+  return true;
+}
+
+export async function failBooking(db, bookingId, reason = null) {
+  const now = new Date().toISOString();
+  const summary = reason ? `FAILED: ${reason}` : "FAILED";
+  await run(
+    db,
+    `
+    UPDATE bookings
+    SET status='failed',
+        job_summary=COALESCE(job_summary, ?) ,
+        updated_at_utc=?
+    WHERE id=?
+    `,
+    [summary, now, bookingId]
+  );
+  return true;
+}
+
+export async function cancelBooking(db, bookingId) {
+  const now = new Date().toISOString();
+  await run(
+    db,
+    `
+    UPDATE bookings
+    SET status='cancelled',
+        updated_at_utc=?
+    WHERE id=?
+    `,
+    [now, bookingId]
+  );
+  return true;
+}
+
+export async function getBookingById(db, bookingId) {
+  return get(
+    db,
+    `
+    SELECT *
+    FROM bookings
+    WHERE id = ?
+    `,
+    [bookingId]
+  );
+}
