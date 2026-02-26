@@ -68,3 +68,49 @@ export async function exchangeCodeAndStore(oauth2Client, code) {
 
   return tokens;
 }
+export function getAuthUrlForBusiness(oauth2Client, businessId) {
+  return oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    scope: SCOPES,
+    state: businessId, // важно: пронесём businessId через callback
+  });
+}
+
+export async function loadTokensIntoClientForBusiness(oauth2Client, businessId) {
+  const row = await getGoogleTokens(businessId);
+  if (!row || !row.access_token) {
+    throw new Error("No tokens for this business");
+  }
+
+  // expiry_date_utc мы храним ISO string -> переводим в ms
+  const expiryMs = row.expiry_date_utc ? Date.parse(row.expiry_date_utc) : undefined;
+
+  oauth2Client.setCredentials({
+    access_token: row.access_token,
+    refresh_token: row.refresh_token || undefined,
+    scope: row.scope || undefined,
+    token_type: row.token_type || undefined,
+    expiry_date: expiryMs || undefined,
+  });
+
+  return row;
+}
+
+export async function exchangeCodeAndStoreForBusiness(oauth2Client, businessId, code) {
+  const { tokens } = await oauth2Client.getToken(code);
+
+  await upsertGoogleTokens(businessId, tokens);
+
+  oauth2Client.setCredentials(tokens);
+
+  oauth2Client.on("tokens", async (newTokens) => {
+    try {
+      await upsertGoogleTokens(businessId, newTokens);
+    } catch (e) {
+      console.error("Failed to save refreshed tokens (business):", e);
+    }
+  });
+
+  return tokens;
+}
