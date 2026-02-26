@@ -145,7 +145,7 @@ app.get("/auth/google-business", (req, res) => {
   }
 });
 
-app.get("/debug/tokens", async (req, res) => {
+//app.get("/debug/tokens", async (req, res) => {
   const row = await getTokens();
   res.json({
     hasAccessToken: !!row?.access_token,
@@ -165,26 +165,26 @@ app.get("/voice", (req, res) => {
 });
 app.get("/auth/google/callback", async (req, res) => {
   try {
-    const code = String(req.query.code || "");
-    const state = String(req.query.state || ""); // businessId для multi-tenant
-
+    const code = req.query.code;
+    const state = req.query.state; // тут businessId, если это business flow
     if (!code) return res.status(400).send("Missing code");
 
     if (state) {
-      await exchangeCodeAndStoreForBusiness(oauth2Client, state, code);
-      return res.status(200).send("Business Google Calendar connected successfully 😈🔥");
+      // ВАЖНО: порядок аргументов как в ТВОЕМ googleAuth.js
+      await exchangeCodeAndStoreForBusiness(oauth2Client, String(state), String(code));
+      return res.status(200).send("Business Google Calendar connected ✅");
     }
 
-    await exchangeCodeAndStore(oauth2Client, code);
-    return res.status(200).send("Google Calendar connected successfully 😈🔥");
+    await exchangeCodeAndStore(oauth2Client, String(code));
+    return res.status(200).send("Google Calendar connected ✅");
   } catch (e) {
     console.error("OAuth callback error:", e);
-    res.status(500).send("OAuth failed: " + String(e?.message || e));
+    return res.status(500).send("OAuth failed: " + String(e?.message || e));
   }
 });
 
 
-app.get("/debug/calendar", async (req, res) => {
+//app.get("/debug/calendar", async (req, res) => {
   try {
     await loadTokensIntoClient(oauth2Client);
 
