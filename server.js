@@ -165,15 +165,21 @@ app.get("/voice", (req, res) => {
 });
 app.get("/auth/google/callback", async (req, res) => {
   try {
-    const code = req.query.code;
+    const code = String(req.query.code || "");
+    const state = String(req.query.state || ""); // businessId для multi-tenant
+
     if (!code) return res.status(400).send("Missing code");
 
-    await exchangeCodeAndStore(oauth2Client, code);
+    if (state) {
+      await exchangeCodeAndStoreForBusiness(oauth2Client, state, code);
+      return res.status(200).send("Business Google Calendar connected successfully 😈🔥");
+    }
 
-    res.status(200).send("Google Calendar connected successfully 😈🔥");
+    await exchangeCodeAndStore(oauth2Client, code);
+    return res.status(200).send("Google Calendar connected successfully 😈🔥");
   } catch (e) {
     console.error("OAuth callback error:", e);
-    res.status(500).send("OAuth failed");
+    res.status(500).send("OAuth failed: " + String(e?.message || e));
   }
 });
 
@@ -242,7 +248,7 @@ app.get("/debug/calendar-business", async (req, res) => {
 app.post("/voice", (req, res) => {
   console.log("POST /voice from Twilio");
 
-  const host = req.headers.host;
+const host = req.headers["x-forwarded-host"] || req.headers.host;
 
   const twiml = `
 <Response>
