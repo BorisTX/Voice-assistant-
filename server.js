@@ -198,13 +198,13 @@ app.get("/debug/tokens-business", async (req, res) => {
 
 app.get("/debug/calendar-business", async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
     const businessId = String(req.query.business_id || "");
     if (!businessId) return res.status(400).json({ ok: false, error: "Missing business_id" });
 
     const oauth2Client = makeOAuthClient();
-    await loadTokensIntoClientForBusiness(db, oauth2Client, businessId);
+    await loadTokensIntoClientForBusiness(data, oauth2Client, businessId);
 
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
     const now = new Date().toISOString();
@@ -269,7 +269,7 @@ app.get("/api/available-slots", async (req, res) => {
 
     // Google freebusy
     const oauth2Client = makeOAuthClient();
-    await loadTokensIntoClientForBusiness(db, oauth2Client, businessId);
+    await loadTokensIntoClientForBusiness(data, oauth2Client, businessId);
 
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
 
@@ -546,14 +546,17 @@ wss.on("connection", (twilioWs) => {
 // --------------------
 const PORT = process.env.PORT || 10000;
 
+let db;    // raw connection
+let data;  // data layer
+
 async function start() {
   console.log("Starting server...");
 
-  // 1) open raw sqlite connection
+  // 1) open db + migrations
   db = openDb();
   await runMigrations(db);
 
-  // 2) build data layer (sqlite now, later postgres)
+  // 2) init data layer ONCE
   const layer = makeDataLayer({ db });
   data = layer.data;
 
