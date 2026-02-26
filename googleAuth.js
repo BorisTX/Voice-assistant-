@@ -58,6 +58,7 @@ export async function exchangeCodeAndStore(oauth2Client, code) {
   oauth2Client.setCredentials(tokens);
 
   // если Google обновит токены позже (refresh), сохраним в DB
+  oauth2Client.removeAllListeners("tokens");
   oauth2Client.on("tokens", async (newTokens) => {
     try {
       await dbSaveTokens(newTokens);
@@ -97,13 +98,14 @@ export async function loadTokensIntoClientForBusiness(oauth2Client, businessId) 
   return row;
 }
 
-export async function exchangeCodeAndStoreForBusiness(oauth2Client, businessId, code) {
+export async function exchangeCodeAndStoreForBusiness(oauth2Client, code, businessId) {
   const { tokens } = await oauth2Client.getToken(code);
 
   await upsertGoogleTokens(businessId, tokens);
 
   oauth2Client.setCredentials(tokens);
-
+  
+oauth2Client.removeAllListeners("tokens");
   oauth2Client.on("tokens", async (newTokens) => {
     try {
       await upsertGoogleTokens(businessId, newTokens);
