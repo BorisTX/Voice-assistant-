@@ -132,6 +132,19 @@ app.get("/auth/google", (req, res) => {
     return res.status(500).send("OAuth error: " + (e?.message || String(e)));
   }
 });
+app.get("/auth/google-business", (req, res) => {
+  try {
+    const businessId = req.query.business_id;
+    if (!businessId) return res.status(400).send("Missing business_id");
+
+    const url = getAuthUrlForBusiness(oauth2Client, String(businessId));
+    return res.redirect(url);
+  } catch (e) {
+    console.error("ERROR in /auth/google-business:", e);
+    return res.status(500).send("OAuth error: " + (e?.message || String(e)));
+  }
+});
+
 app.get("/debug/tokens", async (req, res) => {
   const row = await getTokens();
   res.json({
@@ -190,6 +203,38 @@ app.get("/debug/calendar", async (req, res) => {
     });
   } catch (e) {
     console.error("DEBUG calendar error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+app.get("/debug/calendar-business", async (req, res) => {
+  try {
+    const businessId = req.query.business_id;
+    if (!businessId) return res.status(400).json({ ok: false, error: "Missing business_id" });
+
+    await loadTokensIntoClientForBusiness(oauth2Client, String(businessId));
+
+    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+    const now = new Date().toISOString();
+
+    const result = await calendar.events.list({
+      calendarId: "primary",
+      timeMin: now,
+      maxResults: 10,
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    res.json({
+      ok: true,
+      businessId,
+      items: (result.data.items || []).map((e) => ({
+        summary: e.summary,
+        start: e.start?.dateTime || e.start?.date,
+        end: e.end?.dateTime || e.end?.date,
+      })),
+    });
+  } catch (e) {
+    console.error("DEBUG calendar-business error:", e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
