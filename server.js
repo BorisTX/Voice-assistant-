@@ -146,14 +146,14 @@ app.get("/auth/google-business", (req, res) => {
 });
 
 //app.get("/debug/tokens", async (req, res) => {
-  const row = await getTokens();
-  res.json({
-    hasAccessToken: !!row?.access_token,
-    hasRefreshToken: !!row?.refresh_token,
-    scope: row?.scope,
-    expiry_date: row?.expiry_date,
-    updated_at: row?.updated_at,
-  });
+const row = await getTokens();
+res.json({
+  hasAccessToken: !!row?.access_token,
+  hasRefreshToken: !!row?.refresh_token,
+  scope: row?.scope,
+  expiry_date: row?.expiry_date,
+  updated_at: row?.updated_at,
+});
 });
 // ...
 
