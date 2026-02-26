@@ -154,7 +154,7 @@ res.json({
   expiry_date: row?.expiry_date,
   updated_at: row?.updated_at,
 });
-});
+
 // ...
 
 // Twilio webhook → returns TwiML with Media Stream
