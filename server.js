@@ -3,9 +3,11 @@ import http from "http";
 import WebSocket, { WebSocketServer } from "ws";
 import { getTokens } from "./db.js";
 import { google } from "googleapis";
-import { initDb } from "./db.js";
+//import { initDb } from "./db.js";
 import { makeOAuthClient, getAuthUrl, loadTokensIntoClient, exchangeCodeAndStore } from "./googleAuth.js";
 import { openDb, runMigrations } from "./src/db/migrate.js";
+import crypto from "crypto"; // <-- ВАЖНО: если у тебя вверху нет crypto, добавь импорт
+let db; // будет глобальным, чтобы эндпоинты могли использовать одну БД
 //initDb();
 const oauth2Client = makeOAuthClient();
 const app = express();
@@ -18,8 +20,77 @@ app.use((req, res, next) => {
 });
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
+
+app.get("/debug/create-default-business", (req, res) => {
+  
+  if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
+
+  const name = "Default HVAC (DFW)";
+  const now = new Date().toISOString();
+
+  // 1) сначала ищем — вдруг уже есть
+  db.get(
+    "SELECT id, name, timezone FROM businesses WHERE name = ? LIMIT 1",
+    [name],
+    (err, row) => {
+      if (err) return res.status(500).json({ ok: false, error: String(err) });
+      if (row) return res.json({ ok: true, created: false, businessId: row.id, business: row });
+
+      // 2) создаём новый business
+      const businessId = crypto.randomUUID();
+
+      const workingHours = {
+        mon: [{ start: "08:00", end: "17:00" }],
+        tue: [{ start: "08:00", end: "17:00" }],
+        wed: [{ start: "08:00", end: "17:00" }],
+        thu: [{ start: "08:00", end: "17:00" }],
+        fri: [{ start: "08:00", end: "17:00" }],
+        sat: [],
+        sun: []
+      };
+
+      const emergencyKeywords = ["no heat", "no cooling", "gas smell", "water leak", "flooding"];
+
+      const sql = `
+        INSERT INTO businesses (
+          id, name, industry, timezone, working_hours_json,
+          default_duration_min, slot_granularity_min,
+          buffer_before_min, buffer_after_min,
+          lead_time_min, max_days_ahead, max_daily_jobs,
+          emergency_enabled, emergency_keywords_json,
+          created_at_utc, updated_at_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+
+      const params = [
+        businessId,
+        name,
+        "hvac",
+        "America/Chicago",
+        JSON.stringify(workingHours),
+        60,   // default_duration_min
+        15,   // slot_granularity_min
+        0,    // buffer_before_min
+        30,   // buffer_after_min
+        60,   // lead_time_min
+        7,    // max_days_ahead
+        null, // max_daily_jobs
+        1,    // emergency_enabled
+        JSON.stringify(emergencyKeywords),
+        now,
+        now
+      ];
+
+      db.run(sql, params, function (err2) {
+        if (err2) return res.status(500).json({ ok: false, error: String(err2) });
+        return res.json({ ok: true, created: true, businessId });
+      });
+    }
+  );
+});
 app.get("/debug/db", (req, res) => {
-  const db = openDb();
+  if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
+
   db.all(
     "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
     (err, rows) => {
@@ -28,19 +99,18 @@ app.get("/debug/db", (req, res) => {
     }
   );
 });
-app.get("/auth/google/callback", async (req, res) => {
-  try {
-    const code = req.query.code;
-    if (!code) return res.status(400).send("Missing code");
+app.get("/debug/businesses", (req, res) => {
+  if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
 
-    await exchangeCodeAndStore(oauth2Client, code);
-
-    res.status(200).send("Google Calendar connected successfully 😈🔥");
-  } catch (e) {
-    console.error("OAuth callback error:", e);
-    res.status(500).send("OAuth failed");
-  }
+  db.all(
+    "SELECT id, name, industry, timezone, created_at_utc FROM businesses ORDER BY created_at_utc DESC",
+    (err, rows) => {
+      if (err) return res.status(500).json({ ok: false, error: String(err) });
+      res.json({ ok: true, count: rows.length, businesses: rows });
+    }
+  );
 });
+
 app.get("/auth/google", (req, res) => {
   try {
     const url = getAuthUrl(oauth2Client);
@@ -65,22 +135,7 @@ app.get("/debug/tokens", async (req, res) => {
   });
 });
 // ...
-app.get("/debug/calendar", async (req, res) => {
-  try {
-    // 1) загрузить токены в oauth2Client (важно)
-    await loadTokensIntoClient(oauth2Client);
 
-    // 2) дернуть Calendar API
-    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
-
-    const now = new Date().toISOString();
-    const out = await calendar.events.list({
-      calendarId: "primary",
-      timeMin: now,
-      maxResults: 10,
-      singleEvents: true,
-      orderBy: "startTime",
-    });
 
     const items = out.data.items || [];
     res.json({
@@ -362,7 +417,7 @@ async function start() {
   console.log("Starting server...");
 
   // 1️⃣ Открываем БД
-  const db = openDb();
+  db = openDb();
 
   // 2️⃣ Прогоняем миграции
   await runMigrations(db);
