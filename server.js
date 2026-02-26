@@ -191,9 +191,9 @@ app.get("/debug/calendar", async (req, res) => {
       orderBy: "startTime",
     });
 
-    res.json({
+        res.json({
       ok: true,
-      items: result.data.items?.map((e) => ({
+      items: (result.data.items || []).map((e) => ({
         summary: e.summary,
         start: e.start?.dateTime || e.start?.date,
         end: e.end?.dateTime || e.end?.date,
@@ -203,6 +203,7 @@ app.get("/debug/calendar", async (req, res) => {
     console.error("DEBUG calendar error:", e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
+});
 });
 // Twilio webhook (POST)
 app.post("/voice", (req, res) => {
