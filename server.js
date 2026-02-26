@@ -18,7 +18,15 @@ import {
   loadTokensIntoClientForBusiness,
   exchangeCodeAndStoreForBusiness,
 } from "./googleAuth.js";
-
+import {
+  getBusinessById,
+  getBusinessByName,
+  insertBusiness,
+  listBusinesses,
+  listTables,
+  getGoogleTokens,
+  upsertGoogleTokens,
+} from "./db.js";
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
@@ -40,7 +48,8 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 app.get("/debug/db", async (req, res) => {
   try {
     if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
-    const tables = await data.listTables();
+
+    const tables = await listTables(db);
     res.json({ ok: true, tables });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -50,7 +59,8 @@ app.get("/debug/db", async (req, res) => {
 app.get("/debug/businesses", async (req, res) => {
   try {
     if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
-    const businesses = await data.listBusinesses();
+
+    const businesses = await listBusinesses(db);
     res.json({ ok: true, count: businesses.length, businesses });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
