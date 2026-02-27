@@ -28,6 +28,16 @@ function all(db, sql, params = []) {
   });
 }
 
+
+function execSql(db, sql) {
+  return new Promise((resolve, reject) => {
+    db.exec(sql, (err) => {
+      if (err) return reject(err);
+      resolve(true);
+    });
+  });
+}
+
 // --- businesses ---
 export async function getBusinessById(db, businessId) {
   return get(
@@ -361,3 +371,69 @@ export async function getBookingById(db, bookingId) {
     [bookingId]
   );
 }
+
+
+export async function createPendingHoldIfAvailableTx(db, payload) {
+  const now = new Date().toISOString();
+  const {
+    id,
+    business_id,
+    start_utc,
+    end_utc,
+    hold_expires_at_utc,
+    customer_name = null,
+    customer_phone = null,
+    customer_email = null,
+    job_summary = null,
+  } = payload;
+
+  if (!id) throw new Error("createPendingHoldIfAvailableTx: missing id");
+  if (!business_id) throw new Error("createPendingHoldIfAvailableTx: missing business_id");
+  if (!start_utc || !end_utc) throw new Error("createPendingHoldIfAvailableTx: missing start/end");
+
+  await execSql(db, "BEGIN IMMEDIATE;");
+  try {
+    await cleanupExpiredHolds(db, business_id);
+
+    const overlaps = await findOverlappingActiveBookings(db, business_id, start_utc, end_utc);
+    if (overlaps.length > 0) {
+      await execSql(db, "ROLLBACK;");
+      return { ok: false, reason: "Slot already taken" };
+    }
+
+    await run(
+      db,
+      `
+      INSERT INTO bookings (
+        id, business_id,
+        start_utc, end_utc,
+        status, hold_expires_at_utc,
+        customer_name, customer_phone, customer_email,
+        job_summary,
+        gcal_event_id,
+        created_at_utc, updated_at_utc
+      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, ?, ?)
+      `,
+      [
+        id,
+        business_id,
+        start_utc,
+        end_utc,
+        hold_expires_at_utc,
+        customer_name,
+        customer_phone,
+        customer_email,
+        job_summary,
+        now,
+        now,
+      ]
+    );
+
+    await execSql(db, "COMMIT;");
+    return { ok: true };
+  } catch (err) {
+    await execSql(db, "ROLLBACK;");
+    throw err;
+  }
+}
+

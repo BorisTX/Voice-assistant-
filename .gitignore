@@ -1,7 +1,9 @@
-﻿node_modules/
+node_modules/
 .env
+.env.*
+!.env.example
 data.sqlite
 *.sqlite
 .DS_Store
 npm-debug.log*
-
+*.sqlite-*
