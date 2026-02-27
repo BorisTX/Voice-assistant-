@@ -279,6 +279,32 @@ app.get("/api/available-slots", async (req, res) => {
         items: [{ id: "primary" }],
       },
     });
+            // Extract busy intervals from Google freebusy
+    const busy = fb?.data?.calendars?.primary?.busy || []; // [{ start, end }, ...] in ISO strings (UTC)
+
+    // Optional buffer (minutes) from business profile
+    const bufferMin = Number(business.buffer_min || business.buffer_minutes || 0);
+
+    // Normalize/merge busy + apply buffer (your normalizeBusyUtc should handle this)
+    const busyUtc = normalizeBusyUtc(busy, bufferMin);
+
+    // Generate slots (this depends on your slots.js signature)
+    // Most likely: generateSlots({ windowStartZ, windowEndZ, busyUtc, durationMin, tz, business })
+    const slots = generateSlots({
+      windowStartZ,
+      windowEndZ,
+      busyUtc,
+      durationMin,
+      tz,
+      business,
+    });
+
+    return res.json({ ok: true, slots });
+  } catch (e) {
+    console.error("available-slots error:", e);
+    return res.status(500).json({ ok: false, error: "Internal error" });
+  }
+});
 app.post("/api/book", async (req, res) => {
   try {
     if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
