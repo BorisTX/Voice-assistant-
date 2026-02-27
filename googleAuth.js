@@ -24,12 +24,16 @@ export function makeOAuthClient() {
 export async function getAuthUrlForBusiness(data, oauth2Client, businessId) {
   await data.assertBusinessExists(businessId);
 
-  // IMPORTANT: method name is generateAuthUrl (lowercase L)
+  const nonce = crypto.randomUUID();
+  const ts = Date.now();
+
+  const state = signOAuthState({ businessId, nonce, ts });
+
   const url = oauth2Client.generateAuthUrl({
-    access_type: "offline", // to get refresh_token
-    prompt: "consent",      // ensures refresh_token on re-consent
+    access_type: "offline",
+    prompt: "consent",
     scope: ["https://www.googleapis.com/auth/calendar"],
-    state: businessId,      // route callback to the business
+    state,
   });
 
   return url;
