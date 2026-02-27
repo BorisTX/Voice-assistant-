@@ -271,7 +271,7 @@ app.get("/api/available-slots", async (req, res) => {
 
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
 
-    const fb = await calendar.freebusy.query({
+        const fb = await calendar.freebusy.query({
       requestBody: {
         timeMin: timeMinUtc,
         timeMax: timeMaxUtc,
@@ -279,40 +279,28 @@ app.get("/api/available-slots", async (req, res) => {
         items: [{ id: "primary" }],
       },
     });
-        // Extract busy intervals from Google freebusy
-    const busy = fb?.data?.calendars?.primary?.busy || []; // [{ start, end }, ...] ISO UTC
 
-    // Your slot engine expects merged busy in UTC from normalizeBusyUtc()
-    // If normalizeBusyUtc also applies buffer, pass it there if the function supports it.
-    const busyMergedUtc = normalizeBusyUtc(busy, business);
+    // Extract busy intervals from Google freebusy (UTC ISO strings)
+    const busy = fb?.data?.calendars?.primary?.busy || [];
 
-    const slots = generateSlots({
-      business,
-      windowStartDate: windowStartZ,   // already startOf("day") in business TZ
-      days,
-      durationMin,
-      busyMergedUtc,
-    });
+    // Validate duration
+    const dur = Number(durationMin);
+    if (!Number.isFinite(dur) || dur <= 0 || dur > 8 * 60) {
+      return res.status(400).json({ ok: false, error: "Bad duration_min" });
+    }
 
-    return res.json({ ok: true, slots });
-            // Extract busy intervals from Google freebusy
-    const busy = fb?.data?.calendars?.primary?.busy || []; // [{ start, end }, ...] in ISO strings (UTC)
-
-    // Optional buffer (minutes) from business profile
+    // Buffer minutes (apply both sides)
     const bufferMin = Number(business.buffer_min || business.buffer_minutes || 0);
 
-    // Normalize/merge busy + apply buffer (your normalizeBusyUtc should handle this)
-    const busyUtc = normalizeBusyUtc(busy, bufferMin);
+    // Merge busy intervals and expand by buffer
+    const busyMergedUtc = normalizeBusyUtc(busy, bufferMin, bufferMin);
 
-    // Generate slots (this depends on your slots.js signature)
-    // Most likely: generateSlots({ windowStartZ, windowEndZ, busyUtc, durationMin, tz, business })
     const slots = generateSlots({
-      windowStartZ,
-      windowEndZ,
-      busyUtc,
-      durationMin,
-      tz,
       business,
+      windowStartDate: windowStartZ, // DateTime, business TZ, startOf("day")
+      days,
+      durationMin: dur,
+      busyMergedUtc,
     });
 
     return res.json({ ok: true, slots });
@@ -321,6 +309,7 @@ app.get("/api/available-slots", async (req, res) => {
     return res.status(500).json({ ok: false, error: "Internal error" });
   }
 });
+
 app.post("/api/book", async (req, res) => {
   try {
     if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
@@ -344,6 +333,9 @@ app.post("/api/book", async (req, res) => {
 
     const tz = business.timezone || "America/Chicago";
     const durMin = Number(duration_min || business.default_duration_min || 60);
+    if (!Number.isFinite(durMin) || durMin <= 0 || durMin > 8 * 60) {
+      return res.status(400).json({ ok: false, error: "Bad duration_min" });
+    }
 
     const startZ = DateTime.fromISO(start_local, { zone: tz });
     if (!startZ.isValid) {
@@ -358,18 +350,12 @@ app.post("/api/book", async (req, res) => {
     await data.cleanupExpiredHolds(business_id);
 
     // DB overlap check
-    const overlaps = await data.findOverlappingActiveBookings(
-      business_id,
-      startUtc,
-      endUtc
-    );
-
+    const overlaps = await data.findOverlappingActiveBookings(business_id, startUtc, endUtc);
     if (overlaps.length > 0) {
       return res.status(409).json({ ok: false, error: "Slot already taken" });
     }
 
     const bookingId = crypto.randomUUID();
-
     const holdExpiresUtc = DateTime.utc().plus({ minutes: 5 }).toISO();
 
     await data.createPendingHold({
@@ -383,6 +369,13 @@ app.post("/api/book", async (req, res) => {
       customer_email,
       job_summary: job_summary || (address ? `Address: ${address}` : null),
     });
+
+    // ... (твой код дальше: freebusy recheck, create event, confirmBooking, etc.)
+  } catch (e) {
+    console.error("book error:", e);
+    return res.status(500).json({ ok: false, error: "Internal error" });
+  }
+});
 
     // Google revalidate + create
     const oauth2Client = makeOAuthClient();
