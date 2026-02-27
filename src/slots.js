@@ -1,8 +1,18 @@
 // src/slots.js
 import { DateTime } from "luxon";
 
-// weekday map -> our working_hours_json keys
+// Our working_hours_json keys
+// We'll use keys: sun, mon, tue, wed, thu, fri, sat
 const WD = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+function safeJsonParse(str, fallback) {
+  try {
+    const v = JSON.parse(str);
+    return v && typeof v === "object" ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 function parseHHMM(hhmm) {
   const [h, m] = String(hhmm).split(":").map((x) => parseInt(x, 10));
@@ -21,7 +31,6 @@ function alignUp(dt, granMin) {
   const aligned = Math.ceil(minutes / granMin) * granMin;
   const hour = Math.floor(aligned / 60);
   const minute = aligned % 60;
-  // keep date same; reset seconds
   return dt.set({ hour, minute, second: 0, millisecond: 0 });
 }
 
@@ -41,7 +50,6 @@ function mergeIntervals(intervals) {
     const cur = sorted[i];
     const last = out[out.length - 1];
     if (cur.start.toMillis() <= last.end.toMillis()) {
-      // merge
       last.end = DateTime.max(last.end, cur.end);
     } else {
       out.push(cur);
@@ -53,6 +61,8 @@ function mergeIntervals(intervals) {
 /**
  * Expand busy intervals by buffers (in minutes) and merge overlaps.
  * busy: [{startUtcIso, endUtcIso}] or [{start, end}] where values are ISO strings
+ *
+ * NOTE: freebusy returns UTC ISO strings in { start, end } already, so this works.
  */
 export function normalizeBusyUtc(busy, bufferBeforeMin = 0, bufferAfterMin = 0) {
   const intervals = (busy || [])
@@ -60,9 +70,10 @@ export function normalizeBusyUtc(busy, bufferBeforeMin = 0, bufferAfterMin = 0) 
       const s = DateTime.fromISO(b.startUtcIso || b.start, { zone: "utc" });
       const e = DateTime.fromISO(b.endUtcIso || b.end, { zone: "utc" });
       if (!s.isValid || !e.isValid) return null;
+
       return {
-        start: s.minus({ minutes: bufferBeforeMin || 0 }),
-        end: e.plus({ minutes: bufferAfterMin || 0 }),
+        start: s.minus({ minutes: Number(bufferBeforeMin) || 0 }),
+        end: e.plus({ minutes: Number(bufferAfterMin) || 0 }),
       };
     })
     .filter(Boolean);
@@ -97,25 +108,28 @@ export function generateSlots({
   const earliestZ = nowZ.plus({ minutes: leadMin });
 
   const out = [];
-  const endDate = windowStartDate.plus({ days });
+  const startDayZ = windowStartDate.setZone(tz).startOf("day");
+  const endDateZ = startDayZ.plus({ days: Number(days) || 0 });
 
-  // iterate days
-  for (
-    let d = windowStartDate.startOf("day");
-    d < endDate;
-    d = d.plus({ days: 1 })
-  ) {
-    const wdKey = WD[d.weekday % 7]; // luxon weekday: Mon=1..Sun=7. Our WD uses sun=0
-    // Fix mapping:
-    // luxon weekday: 1=Mon..7=Sun
-    const wdKey2 = WD[d.weekday === 7 ? 0 : d.weekday]; // 0..6 mapping
-    const dayWindows = Array.isArray(working[wdKey2]) ? working[wdKey2] : [];
+  // iterate days [startDayZ, endDateZ)
+  for (let d = startDayZ; d < endDateZ; d = d.plus({ days: 1 })) {
+    // Luxon weekday: 1=Mon..7=Sun. Convert to our WD index: 0=Sun..6=Sat.
+    const wdIndex = d.weekday === 7 ? 0 : d.weekday; // Mon->1..Sat->6, Sun->0
+    const wdKey = WD[wdIndex]; // "sun".."sat"
 
+    const dayWindows = Array.isArray(working[wdKey]) ? working[wdKey] : [];
     if (!dayWindows.length) continue;
 
     for (const w of dayWindows) {
-      const startZ = makeZonedDateTime(d, w.start);
-      const endZ = makeZonedDateTime(d, w.end);
+      // Expect w = { start: "HH:MM", end: "HH:MM" }
+      let startZ, endZ;
+      try {
+        startZ = makeZonedDateTime(d, w.start);
+        endZ = makeZonedDateTime(d, w.end);
+      } catch {
+        // skip malformed windows
+        continue;
+      }
 
       if (endZ <= startZ) continue;
 
@@ -123,18 +137,16 @@ export function generateSlots({
       let cursorZ = DateTime.max(startZ, earliestZ);
       cursorZ = alignUp(cursorZ, granMin);
 
-      const endLimitZ = endZ;
-
-      while (cursorZ.plus({ minutes: durMin }) <= endLimitZ) {
+      while (cursorZ.plus({ minutes: durMin }) <= endZ) {
         const slotStartZ = cursorZ;
         const slotEndZ = cursorZ.plus({ minutes: durMin });
 
         const slotStartUtc = slotStartZ.toUTC();
         const slotEndUtc = slotEndZ.toUTC();
 
-        // check overlap with busy
+        // check overlap with merged busy intervals
         let blocked = false;
-        for (const b of busyMergedUtc) {
+        for (const b of busyMergedUtc || []) {
           if (overlaps(slotStartUtc, slotEndUtc, b.start, b.end)) {
             blocked = true;
             break;
@@ -156,13 +168,4 @@ export function generateSlots({
   }
 
   return out;
-}
-
-function safeJsonParse(str, fallback) {
-  try {
-    const v = JSON.parse(str);
-    return v && typeof v === "object" ? v : fallback;
-  } catch {
-    return fallback;
-  }
 }
