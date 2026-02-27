@@ -18,23 +18,25 @@ import {
   loadTokensIntoClientForBusiness,
   exchangeCodeAndStoreForBusiness,
 } from "./googleAuth.js";
-import {
-  getBusinessById,
-  getBusinessByName,
-  insertBusiness,
-  listBusinesses,
-  listTables,
-  getGoogleTokens,
-  upsertGoogleTokens,
-} from "./db.js";
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 app.use((req, res, next) => {
-  console.log("INCOMING:", req.method, req.url);
+  req.requestId = crypto.randomUUID();
+  const startAt = Date.now();
+  console.log(`[req:${req.requestId}] -> ${req.method} ${req.url}`);
+  res.on("finish", () => {
+    console.log(`[req:${req.requestId}] <- ${res.statusCode} ${req.method} ${req.url} (${Date.now() - startAt}ms)`);
+  });
   next();
 });
+
+function ensureDebugEnabled(req, res) {
+  if (process.env.ENABLE_DEBUG_ROUTES === "1") return true;
+  res.status(403).json({ ok: false, error: "Debug routes are disabled" });
+  return false;
+}
 
 
 // Health check
@@ -45,9 +47,10 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 // --------------------
 app.get("/debug/db", async (req, res) => {
   try {
+    if (!ensureDebugEnabled(req, res)) return;
     if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
 
-    const tables = await listTables(db);
+    const tables = await data.listTables();
     res.json({ ok: true, tables });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -56,9 +59,10 @@ app.get("/debug/db", async (req, res) => {
 
 app.get("/debug/businesses", async (req, res) => {
   try {
+    if (!ensureDebugEnabled(req, res)) return;
     if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
 
-    const businesses = await listBusinesses(db);
+    const businesses = await data.listBusinesses();
     res.json({ ok: true, count: businesses.length, businesses });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -71,6 +75,7 @@ app.get("/debug/businesses", async (req, res) => {
  */
 app.get("/debug/create-default-business", async (req, res) => {
   try {
+    if (!ensureDebugEnabled(req, res)) return;
     if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
 
     const name = "Default HVAC (DFW)";
@@ -173,6 +178,7 @@ app.get("/auth/google/callback", async (req, res) => {
 // --------------------
 app.get("/debug/tokens-business", async (req, res) => {
   try {
+    if (!ensureDebugEnabled(req, res)) return;
     if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
     const businessId = String(req.query.business_id || "");
@@ -196,6 +202,7 @@ app.get("/debug/tokens-business", async (req, res) => {
 
 app.get("/debug/calendar-business", async (req, res) => {
   try {
+    if (!ensureDebugEnabled(req, res)) return;
     if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
     const businessId = String(req.query.business_id || "");
@@ -235,100 +242,113 @@ app.get("/debug/calendar-business", async (req, res) => {
 // --------------------
 app.get("/api/available-slots", async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
-    const businessId = String(req.query.business_id || "");
-    if (!businessId) return res.status(400).json({ ok: false, error: "Missing business_id" });
+    const businessId = String(req.query.business_id || "").trim();
+    if (!businessId) return res.status(400).json({ ok: false, error: "business_id is required" });
 
     const business = await data.getBusinessById(businessId);
     if (!business) return res.status(404).json({ ok: false, error: "Business not found" });
 
-    const tz = business.timezone || "America/Chicago";
-
-    const durationMin = req.query.duration_min
-      ? Number(req.query.duration_min)
-      : Number(business.default_duration_min || 60);
-
-    const daysReq = req.query.days ? Number(req.query.days) : Number(business.max_days_ahead || 7);
-    const days = Math.max(1, Math.min(daysReq, Number(business.max_days_ahead || 7)));
-
-    const fromStr = String(req.query.from || "");
-    const windowStartZ = fromStr
-      ? DateTime.fromISO(fromStr, { zone: tz }).startOf("day")
-      : DateTime.now().setZone(tz).startOf("day");
-
-    if (!windowStartZ.isValid) {
-      return res.status(400).json({ ok: false, error: "Bad from date (use YYYY-MM-DD)" });
+    const timezone = business.timezone || "America/Chicago";
+    const durationMinRaw = req.query.duration_min ?? business.default_duration_min ?? 60;
+    const durationMin = Number(durationMinRaw);
+    if (!Number.isFinite(durationMin) || durationMin <= 0 || durationMin > 8 * 60) {
+      return res.status(400).json({ ok: false, error: "duration_min must be between 1 and 480" });
     }
 
-    const windowEndZ = windowStartZ.plus({ days });
-    const timeMinUtc = windowStartZ.toUTC().toISO();
-    const timeMaxUtc = windowEndZ.toUTC().toISO();
+    const maxDaysAhead = Number(business.max_days_ahead || 7);
+    const daysReq = req.query.days ? Number(req.query.days) : maxDaysAhead;
+    const days = Math.max(1, Math.min(Number.isFinite(daysReq) ? daysReq : maxDaysAhead, maxDaysAhead));
 
-    // Google freebusy
-    const oauth2Client = makeOAuthClient();
-    await loadTokensIntoClientForBusiness(data, oauth2Client, businessId);
+    const fromStr = String(req.query.from || "").trim();
+    const windowStartLocal = fromStr
+      ? DateTime.fromISO(fromStr, { zone: timezone }).startOf("day")
+      : DateTime.now().setZone(timezone).startOf("day");
 
-    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
-
-        const fb = await calendar.freebusy.query({
-      requestBody: {
-        timeMin: timeMinUtc,
-        timeMax: timeMaxUtc,
-        timeZone: "UTC",
-        items: [{ id: "primary" }],
-      },
-    });
-const busy = fb?.data?.calendars?.primary?.busy || [];
-const bufferBefore = Number(business.buffer_before_min || business.buffer_min || business.buffer_minutes || 0);
-const bufferAfter  = Number(business.buffer_after_min  || business.buffer_min || business.buffer_minutes || 0);
-
-const busyMergedUtc = normalizeBusyUtc(busy, bufferBefore, bufferAfter);
-
-const slots = generateSlots({
-  business,
-  windowStartDate: windowStartZ,
-  days,
-  durationMin,
-  busyMergedUtc,
-});
-
-return res.json({
-  ok: true,
-  businessId,
-  timezone: tz,
-  from_local: windowStartZ.toISODate(),
-  days,
-  durationMin,
-  count: slots.length,
-  slots,
-});
-    // Extract busy intervals from Google freebusy (UTC ISO strings)
-    const busy = fb?.data?.calendars?.primary?.busy || [];
-
-    // Validate duration
-    const dur = Number(durationMin);
-    if (!Number.isFinite(dur) || dur <= 0 || dur > 8 * 60) {
-      return res.status(400).json({ ok: false, error: "Bad duration_min" });
+    if (!windowStartLocal.isValid) {
+      return res.status(400).json({ ok: false, error: "from must be valid ISO date (YYYY-MM-DD)" });
     }
 
-    // Buffer minutes (apply both sides)
-    const bufferMin = Number(business.buffer_min || business.buffer_minutes || 0);
+    const nowLocal = DateTime.now().setZone(timezone).startOf("day");
+    if (windowStartLocal < nowLocal || windowStartLocal > nowLocal.plus({ days: maxDaysAhead })) {
+      return res.status(400).json({ ok: false, error: `from is outside allowed window (0-${maxDaysAhead} days)` });
+    }
 
-    // Merge busy intervals and expand by buffer
-    const busyMergedUtc = normalizeBusyUtc(busy, bufferMin, bufferMin);
+    const windowEndLocal = windowStartLocal.plus({ days });
+    const timeMinUtc = windowStartLocal.toUTC().toISO();
+    const timeMaxUtc = windowEndLocal.toUTC().toISO();
 
-    const slots = generateSlots({
+    let busy = [];
+    let warning = null;
+
+    try {
+      const oauth2Client = makeOAuthClient();
+      await loadTokensIntoClientForBusiness(data, oauth2Client, businessId);
+
+      const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+      const fb = await calendar.freebusy.query({
+        requestBody: {
+          timeMin: timeMinUtc,
+          timeMax: timeMaxUtc,
+          timeZone: "UTC",
+          items: [{ id: "primary" }],
+        },
+      });
+      busy = fb?.data?.calendars?.primary?.busy || [];
+    } catch (googleErr) {
+      warning = "Calendar busy lookup unavailable; using DB-only availability";
+      console.warn("[available-slots] freebusy fallback", {
+        businessId,
+        message: String(googleErr?.message || googleErr),
+      });
+    }
+
+    const bufferBefore = Number(business.buffer_before_min || 0);
+    const bufferAfter = Number(business.buffer_after_min || 0);
+    const busyMergedUtc = normalizeBusyUtc(busy, bufferBefore, bufferAfter);
+
+    let slots = generateSlots({
       business,
-      windowStartDate: windowStartZ, // DateTime, business TZ, startOf("day")
+      windowStartDate: windowStartLocal,
       days,
-      durationMin: dur,
+      durationMin,
       busyMergedUtc,
     });
 
-    return res.json({ ok: true, slots });
+    const maxDailyJobs = Number(business.max_daily_jobs || 0);
+    if (Number.isFinite(maxDailyJobs) && maxDailyJobs > 0) {
+      const filtered = [];
+      const confirmedCounts = new Map();
+      for (let d = windowStartLocal; d < windowEndLocal; d = d.plus({ days: 1 })) {
+        const dayStart = d.startOf("day").toUTC().toISO();
+        const dayEnd = d.endOf("day").toUTC().toISO();
+        const booked = await data.findOverlappingActiveBookings(businessId, dayStart, dayEnd);
+        const confirmed = booked.filter((b) => b.status === "confirmed").length;
+        confirmedCounts.set(d.toISODate(), confirmed);
+      }
+
+      for (const slot of slots) {
+        const slotDay = DateTime.fromISO(slot.start_local, { zone: timezone }).toISODate();
+        if ((confirmedCounts.get(slotDay) || 0) < maxDailyJobs) {
+          filtered.push(slot);
+        }
+      }
+      slots = filtered;
+    }
+
+    return res.status(200).json({
+      business_id: businessId,
+      timezone,
+      window_start_local: windowStartLocal.toISO(),
+      window_end_local: windowEndLocal.toISO(),
+      duration_min: durationMin,
+      granularity_min: Number(business.slot_granularity_min || 15),
+      slots,
+      ...(warning ? { error: warning } : {}),
+    });
   } catch (e) {
-    console.error("available-slots error:", e);
+    console.error(`[req:${req.requestId}] available-slots error:`, e);
     return res.status(500).json({ ok: false, error: "Internal error" });
   }
 });
@@ -369,19 +389,10 @@ app.post("/api/book", async (req, res) => {
     const startUtc = startZ.toUTC().toISO();
     const endUtc = endZ.toUTC().toISO();
 
-    // cleanup expired holds
-    await data.cleanupExpiredHolds(business_id);
-
-    // DB overlap check
-    const overlaps = await data.findOverlappingActiveBookings(business_id, startUtc, endUtc);
-    if (overlaps.length > 0) {
-      return res.status(409).json({ ok: false, error: "Slot already taken" });
-    }
-
     const bookingId = crypto.randomUUID();
     const holdExpiresUtc = DateTime.utc().plus({ minutes: 5 }).toISO();
 
-    await data.createPendingHold({
+    const holdResult = await data.createPendingHoldIfAvailableTx({
       id: bookingId,
       business_id,
       start_utc: startUtc,
@@ -393,61 +404,56 @@ app.post("/api/book", async (req, res) => {
       job_summary: job_summary || (address ? `Address: ${address}` : null),
     });
 
-    // ... (твой код дальше: freebusy recheck, create event, confirmBooking, etc.)
+    if (!holdResult.ok) {
+      return res.status(409).json({ ok: false, error: holdResult.reason || "Slot already taken" });
+    }
+
+    try {
+      const oauth2Client = makeOAuthClient();
+      await loadTokensIntoClientForBusiness(data, oauth2Client, business_id);
+      const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+
+      const created = await calendar.events.insert({
+        calendarId: "primary",
+        requestBody: {
+          summary: job_summary || "HVAC Service",
+          description: [
+            customer_name ? `Name: ${customer_name}` : null,
+            customer_phone ? `Phone: ${customer_phone}` : null,
+            customer_email ? `Email: ${customer_email}` : null,
+            address ? `Address: ${address}` : null,
+          ].filter(Boolean).join("\n"),
+          start: { dateTime: startZ.toISO(), timeZone: tz },
+          end: { dateTime: endZ.toISO(), timeZone: tz },
+        },
+      });
+
+      await data.confirmBooking(bookingId, created.data.id);
+
+      return res.status(200).json({
+        ok: true,
+        booking_id: bookingId,
+        status: "confirmed",
+        gcal_event_id: created.data.id,
+      });
+    } catch (calendarError) {
+      await data.failBooking(bookingId, String(calendarError?.message || calendarError));
+      await data.cancelBooking(bookingId);
+
+      console.error("book calendar error:", {
+        bookingId,
+        business_id,
+        message: String(calendarError?.message || calendarError),
+      });
+
+      return res.status(502).json({
+        ok: false,
+        error: "Could not create calendar event; booking hold released",
+      });
+    }
   } catch (e) {
-    console.error("book error:", e);
+    console.error(`[req:${req.requestId}] book error:`, e);
     return res.status(500).json({ ok: false, error: "Internal error" });
-  }
-});
-
-    // Google revalidate + create
-    const oauth2Client = makeOAuthClient();
-    await loadTokensIntoClientForBusiness(data, oauth2Client, business_id);
-
-    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
-
-    const created = await calendar.events.insert({
-      calendarId: "primary",
-      requestBody: {
-        summary: job_summary || "HVAC Service",
-        description: [
-          customer_name ? `Name: ${customer_name}` : null,
-          customer_phone ? `Phone: ${customer_phone}` : null,
-          customer_email ? `Email: ${customer_email}` : null,
-          address ? `Address: ${address}` : null,
-        ].filter(Boolean).join("\n"),
-        start: { dateTime: startZ.toISO(), timeZone: tz },
-        end: { dateTime: endZ.toISO(), timeZone: tz },
-      },
-    });
-
-    await data.confirmBooking(bookingId, created.data.id);
-
-    return res.json({
-      ok: true,
-      bookingId,
-      status: "confirmed",
-      gcal_event_id: created.data.id,
-    });
-  } catch (e) {
-    console.error("Booking error:", e);
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-    res.json({
-      ok: true,
-      businessId,
-      timezone: tz,
-      from_local: windowStartZ.toISODate(),
-      days,
-      durationMin,
-      count: slots.length,
-      slots,
-    });
-  } catch (e) {
-    console.error("available-slots error:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 

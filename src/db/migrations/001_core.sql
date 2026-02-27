@@ -70,6 +70,13 @@ CREATE INDEX IF NOT EXISTS idx_bookings_hold_expires
 CREATE INDEX IF NOT EXISTS idx_bookings_business_status
   ON bookings(business_id, status);
 
+
+CREATE INDEX IF NOT EXISTS idx_bookings_business_status_start
+  ON bookings(business_id, status, start_utc);
+
+CREATE INDEX IF NOT EXISTS idx_bookings_business_status_end
+  ON bookings(business_id, status, end_utc);
+
 CREATE TABLE IF NOT EXISTS call_logs (
   id             TEXT PRIMARY KEY,
   business_id    TEXT NOT NULL REFERENCES businesses(id),
