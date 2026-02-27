@@ -5,7 +5,8 @@ import {
   getBusinessByName,
   listBusinesses,
   insertBusiness,
-
+  createOAuthFlow,
+  consumeOAuthFlow,
   // tokens
   getGoogleTokens,
   upsertGoogleTokens,
@@ -31,7 +32,9 @@ export function makeSqliteData(db) {
   return {
     // debug
     listTables: () => listTables(db),
-
+    // oauth flows (PKCE)
+    createOAuthFlow: (payload) => createOAuthFlow(db, payload),
+    consumeOAuthFlow: (nonce) => consumeOAuthFlow(db, nonce),
     // businesses
     getBusinessById: (businessId) => getBusinessById(db, businessId),
     getBusinessByName: (name) => getBusinessByName(db, name),
