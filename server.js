@@ -279,6 +279,22 @@ app.get("/api/available-slots", async (req, res) => {
         items: [{ id: "primary" }],
       },
     });
+        // Extract busy intervals from Google freebusy
+    const busy = fb?.data?.calendars?.primary?.busy || []; // [{ start, end }, ...] ISO UTC
+
+    // Your slot engine expects merged busy in UTC from normalizeBusyUtc()
+    // If normalizeBusyUtc also applies buffer, pass it there if the function supports it.
+    const busyMergedUtc = normalizeBusyUtc(busy, business);
+
+    const slots = generateSlots({
+      business,
+      windowStartDate: windowStartZ,   // already startOf("day") in business TZ
+      days,
+      durationMin,
+      busyMergedUtc,
+    });
+
+    return res.json({ ok: true, slots });
             // Extract busy intervals from Google freebusy
     const busy = fb?.data?.calendars?.primary?.busy || []; // [{ start, end }, ...] in ISO strings (UTC)
 
