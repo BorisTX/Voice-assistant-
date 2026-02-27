@@ -2,6 +2,24 @@
 import { google } from "googleapis";
 import crypto from "crypto";
 import { signOAuthState } from "./src/security/state.js";
+// ---- PKCE helpers ----
+
+function base64url(buf) {
+  return Buffer.from(buf)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function sha256Base64url(str) {
+  const hash = crypto.createHash("sha256").update(str).digest();
+  return base64url(hash);
+}
+
+function makeCodeVerifier() {
+  return base64url(crypto.randomBytes(32));
+}
 // data-layer methods expected:
 // data.assertBusinessExists(businessId)
 // data.getGoogleTokens(businessId)
