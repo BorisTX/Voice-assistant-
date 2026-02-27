@@ -301,6 +301,98 @@ export async function createPendingHold(db, payload) {
   return true;
 }
 
+export async function createPendingHoldIfAvailableTx(db, payload) {
+  const now = new Date().toISOString();
+  const {
+    id,
+    business_id,
+    start_utc,
+    end_utc,
+    hold_expires_at_utc,
+    customer_name = null,
+    customer_phone = null,
+    customer_email = null,
+    job_summary = null,
+  } = payload;
+
+  if (!id) throw new Error("createPendingHoldIfAvailableTx: missing id");
+  if (!business_id) throw new Error("createPendingHoldIfAvailableTx: missing business_id");
+  if (!start_utc || !end_utc) throw new Error("createPendingHoldIfAvailableTx: missing start/end");
+
+  try {
+    await run(db, "BEGIN IMMEDIATE");
+
+    await run(
+      db,
+      `
+      UPDATE bookings
+      SET status = 'cancelled', hold_expires_at_utc = NULL, updated_at_utc = ?
+      WHERE business_id = ?
+        AND status = 'pending'
+        AND hold_expires_at_utc IS NOT NULL
+        AND hold_expires_at_utc <= ?
+      `,
+      [now, business_id, now]
+    );
+
+    const overlap = await get(
+      db,
+      `
+      SELECT id
+      FROM bookings
+      WHERE business_id = ?
+        AND (
+          status = 'confirmed'
+          OR (status = 'pending' AND (hold_expires_at_utc IS NULL OR hold_expires_at_utc > ?))
+        )
+        AND start_utc < ?
+        AND end_utc > ?
+      LIMIT 1
+      `,
+      [business_id, now, end_utc, start_utc]
+    );
+
+    if (overlap) {
+      await run(db, "ROLLBACK");
+      return { ok: false };
+    }
+
+    await run(
+      db,
+      `
+      INSERT INTO bookings (
+        id, business_id,
+        start_utc, end_utc,
+        status, hold_expires_at_utc,
+        customer_name, customer_phone, customer_email,
+        job_summary,
+        gcal_event_id,
+        created_at_utc, updated_at_utc
+      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, ?, ?)
+      `,
+      [
+        id,
+        business_id,
+        start_utc,
+        end_utc,
+        hold_expires_at_utc,
+        customer_name,
+        customer_phone,
+        customer_email,
+        job_summary,
+        now,
+        now,
+      ]
+    );
+
+    await run(db, "COMMIT");
+    return { ok: true };
+  } catch (e) {
+    try { await run(db, "ROLLBACK"); } catch {}
+    throw e;
+  }
+}
+
 export async function confirmBooking(db, bookingId, gcalEventId) {
   const now = new Date().toISOString();
   await run(
@@ -326,6 +418,7 @@ export async function failBooking(db, bookingId, reason = null) {
     `
     UPDATE bookings
     SET status='failed',
+        hold_expires_at_utc=NULL,
         job_summary=COALESCE(job_summary, ?) ,
         updated_at_utc=?
     WHERE id=?

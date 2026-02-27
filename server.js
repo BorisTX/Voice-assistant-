@@ -249,6 +249,11 @@ app.get("/api/available-slots", async (req, res) => {
       ? Number(req.query.duration_min)
       : Number(business.default_duration_min || 60);
 
+    const dur = Number(durationMin);
+    if (!Number.isFinite(dur) || dur <= 0 || dur > 8 * 60) {
+      return res.status(400).json({ ok: false, error: "Bad duration_min" });
+    }
+
     const daysReq = req.query.days ? Number(req.query.days) : Number(business.max_days_ahead || 7);
     const days = Math.max(1, Math.min(daysReq, Number(business.max_days_ahead || 7)));
 
@@ -270,8 +275,7 @@ app.get("/api/available-slots", async (req, res) => {
     await loadTokensIntoClientForBusiness(data, oauth2Client, businessId);
 
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
-
-        const fb = await calendar.freebusy.query({
+    const fb = await calendar.freebusy.query({
       requestBody: {
         timeMin: timeMinUtc,
         timeMax: timeMaxUtc,
@@ -279,54 +283,31 @@ app.get("/api/available-slots", async (req, res) => {
         items: [{ id: "primary" }],
       },
     });
-const busy = fb?.data?.calendars?.primary?.busy || [];
-const bufferBefore = Number(business.buffer_before_min || business.buffer_min || business.buffer_minutes || 0);
-const bufferAfter  = Number(business.buffer_after_min  || business.buffer_min || business.buffer_minutes || 0);
 
-const busyMergedUtc = normalizeBusyUtc(busy, bufferBefore, bufferAfter);
-
-const slots = generateSlots({
-  business,
-  windowStartDate: windowStartZ,
-  days,
-  durationMin,
-  busyMergedUtc,
-});
-
-return res.json({
-  ok: true,
-  businessId,
-  timezone: tz,
-  from_local: windowStartZ.toISODate(),
-  days,
-  durationMin,
-  count: slots.length,
-  slots,
-});
-    // Extract busy intervals from Google freebusy (UTC ISO strings)
     const busy = fb?.data?.calendars?.primary?.busy || [];
+    const bufferBefore = Number(business.buffer_before_min || business.buffer_min || business.buffer_minutes || 0);
+    const bufferAfter = Number(business.buffer_after_min || business.buffer_min || business.buffer_minutes || 0);
 
-    // Validate duration
-    const dur = Number(durationMin);
-    if (!Number.isFinite(dur) || dur <= 0 || dur > 8 * 60) {
-      return res.status(400).json({ ok: false, error: "Bad duration_min" });
-    }
-
-    // Buffer minutes (apply both sides)
-    const bufferMin = Number(business.buffer_min || business.buffer_minutes || 0);
-
-    // Merge busy intervals and expand by buffer
-    const busyMergedUtc = normalizeBusyUtc(busy, bufferMin, bufferMin);
+    const busyMergedUtc = normalizeBusyUtc(busy, bufferBefore, bufferAfter);
 
     const slots = generateSlots({
       business,
-      windowStartDate: windowStartZ, // DateTime, business TZ, startOf("day")
+      windowStartDate: windowStartZ,
       days,
       durationMin: dur,
       busyMergedUtc,
     });
 
-    return res.json({ ok: true, slots });
+    return res.json({
+      ok: true,
+      businessId,
+      timezone: tz,
+      from_local: windowStartZ.toISODate(),
+      days,
+      durationMin: dur,
+      count: slots.length,
+      slots,
+    });
   } catch (e) {
     console.error("available-slots error:", e);
     return res.status(500).json({ ok: false, error: "Internal error" });
@@ -334,6 +315,8 @@ return res.json({
 });
 
 app.post("/api/book", async (req, res) => {
+  let bookingId = null;
+
   try {
     if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
@@ -369,19 +352,10 @@ app.post("/api/book", async (req, res) => {
     const startUtc = startZ.toUTC().toISO();
     const endUtc = endZ.toUTC().toISO();
 
-    // cleanup expired holds
-    await data.cleanupExpiredHolds(business_id);
-
-    // DB overlap check
-    const overlaps = await data.findOverlappingActiveBookings(business_id, startUtc, endUtc);
-    if (overlaps.length > 0) {
-      return res.status(409).json({ ok: false, error: "Slot already taken" });
-    }
-
-    const bookingId = crypto.randomUUID();
+    bookingId = crypto.randomUUID();
     const holdExpiresUtc = DateTime.utc().plus({ minutes: 5 }).toISO();
 
-    await data.createPendingHold({
+    const holdResult = await data.createPendingHoldIfAvailableTx({
       id: bookingId,
       business_id,
       start_utc: startUtc,
@@ -393,18 +367,39 @@ app.post("/api/book", async (req, res) => {
       job_summary: job_summary || (address ? `Address: ${address}` : null),
     });
 
-    // ... (твой код дальше: freebusy recheck, create event, confirmBooking, etc.)
-  } catch (e) {
-    console.error("book error:", e);
-    return res.status(500).json({ ok: false, error: "Internal error" });
-  }
-});
+    if (!holdResult?.ok) {
+      return res.status(409).json({ ok: false, error: "Slot already taken" });
+    }
 
-    // Google revalidate + create
     const oauth2Client = makeOAuthClient();
     await loadTokensIntoClientForBusiness(data, oauth2Client, business_id);
-
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+
+    const fb = await calendar.freebusy.query({
+      requestBody: {
+        timeMin: startUtc,
+        timeMax: endUtc,
+        timeZone: "UTC",
+        items: [{ id: "primary" }],
+      },
+    });
+
+    const busyIntervals = fb?.data?.calendars?.primary?.busy || [];
+    const slotBusy = busyIntervals.some((interval) => {
+      const busyStart = Date.parse(interval.start);
+      const busyEnd = Date.parse(interval.end);
+      const reqStart = Date.parse(startUtc);
+      const reqEnd = Date.parse(endUtc);
+      return Number.isFinite(busyStart)
+        && Number.isFinite(busyEnd)
+        && busyStart < reqEnd
+        && busyEnd > reqStart;
+    });
+
+    if (slotBusy) {
+      await data.failBooking(bookingId, "google_freebusy_busy");
+      return res.status(409).json({ ok: false, error: "Slot is busy in Google Calendar; booking hold released" });
+    }
 
     const created = await calendar.events.insert({
       calendarId: "primary",
@@ -430,24 +425,16 @@ app.post("/api/book", async (req, res) => {
       gcal_event_id: created.data.id,
     });
   } catch (e) {
-    console.error("Booking error:", e);
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
+    if (bookingId) {
+      try {
+        await data.failBooking(bookingId, `google_booking_error: ${String(e?.message || e)}`);
+      } catch (releaseErr) {
+        console.error("Booking hold release error:", releaseErr);
+      }
+    }
 
-    res.json({
-      ok: true,
-      businessId,
-      timezone: tz,
-      from_local: windowStartZ.toISODate(),
-      days,
-      durationMin,
-      count: slots.length,
-      slots,
-    });
-  } catch (e) {
-    console.error("available-slots error:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error("book error:", e);
+    return res.status(502).json({ ok: false, error: `Google booking failed; hold released: ${String(e?.message || e)}` });
   }
 });
 
