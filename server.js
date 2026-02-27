@@ -279,7 +279,30 @@ app.get("/api/available-slots", async (req, res) => {
         items: [{ id: "primary" }],
       },
     });
+const busy = fb?.data?.calendars?.primary?.busy || [];
+const bufferBefore = Number(business.buffer_before_min || business.buffer_min || business.buffer_minutes || 0);
+const bufferAfter  = Number(business.buffer_after_min  || business.buffer_min || business.buffer_minutes || 0);
 
+const busyMergedUtc = normalizeBusyUtc(busy, bufferBefore, bufferAfter);
+
+const slots = generateSlots({
+  business,
+  windowStartDate: windowStartZ,
+  days,
+  durationMin,
+  busyMergedUtc,
+});
+
+return res.json({
+  ok: true,
+  businessId,
+  timezone: tz,
+  from_local: windowStartZ.toISODate(),
+  days,
+  durationMin,
+  count: slots.length,
+  slots,
+});
     // Extract busy intervals from Google freebusy (UTC ISO strings)
     const busy = fb?.data?.calendars?.primary?.busy || [];
 
@@ -411,20 +434,6 @@ app.post("/api/book", async (req, res) => {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
-    const busy = fb?.data?.calendars?.primary?.busy || [];
-    const busyMergedUtc = normalizeBusyUtc(
-      busy,
-      Number(business.buffer_before_min || 0),
-      Number(business.buffer_after_min || 0)
-    );
-
-    const slots = generateSlots({
-      business,
-      windowStartDate: windowStartZ,
-      days,
-      durationMin,
-      busyMergedUtc,
-    });
 
     res.json({
       ok: true,
