@@ -176,11 +176,18 @@ app.get("/auth/google/callback", async (req, res) => {
     if (!data) return res.status(500).send("Data layer not ready");
 
     const code = String(req.query.code || "");
-    const businessId = String(req.query.state || "");
+const state = String(req.query.state || "");
 
-    if (!code) return res.status(400).send("Missing code");
-    if (!businessId) return res.status(400).send("Missing state");
+if (!code) return res.status(400).send("Missing code");
+if (!state) return res.status(400).send("Missing state");
 
+const verified = verifyOAuthState(state);
+if (!verified.ok) {
+  return res.status(400).send("Invalid state: " + verified.error);
+}
+
+const businessId = String(verified.payload.businessId || "");
+if (!businessId) return res.status(400).send("Invalid state: missing businessId");
     const oauth2Client = makeOAuthClient();
 
     await exchangeCodeAndStoreForBusiness(
