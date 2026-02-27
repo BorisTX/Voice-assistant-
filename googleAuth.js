@@ -45,43 +45,33 @@ export async function getAuthUrlForBusiness(data, oauth2Client, businessId) {
   const nonce = crypto.randomUUID();
   const ts = Date.now();
 
+  // PKCE
+  const code_verifier = makeCodeVerifier();
+  const code_challenge = sha256Base64url(code_verifier);
+
+  // state (HMAC signed payload)
   const state = signOAuthState({ businessId, nonce, ts });
+
+  // сохраняем flow в БД (на 10 минут)
+  const expires_at_utc = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+  await data.createOAuthFlow({
+    nonce,
+    business_id: businessId,
+    code_verifier,
+    expires_at_utc,
+  });
 
   const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
     scope: ["https://www.googleapis.com/auth/calendar"],
     state,
+
+    // PKCE params:
+    code_challenge,
+    code_challenge_method: "S256",
   });
 
   return url;
-}
-
-export async function exchangeCodeAndStoreForBusiness(data, oauth2Client, code, businessId) {
-  await data.assertBusinessExists(businessId);
-
-  const { tokens } = await oauth2Client.getToken(code);
-  await data.upsertGoogleTokens(businessId, tokens);
-
-  return true;
-}
-
-export async function loadTokensIntoClientForBusiness(data, oauth2Client, businessId) {
-  await data.assertBusinessExists(businessId);
-
-  const row = await data.getGoogleTokens(businessId);
-  if (!row?.access_token && !row?.refresh_token) {
-    throw new Error("No tokens for this business");
-  }
-
-  oauth2Client.setCredentials({
-    access_token: row.access_token || undefined,
-    refresh_token: row.refresh_token || undefined,
-    scope: row.scope || undefined,
-    token_type: row.token_type || undefined,
-    expiry_date: row.expiry_date_utc ? new Date(row.expiry_date_utc).getTime() : undefined,
-  });
-
-  // Optional: auto-refresh hook (googleapis will refresh when needed if refresh_token is set)
-  return true;
 }
