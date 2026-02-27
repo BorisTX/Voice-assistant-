@@ -454,3 +454,56 @@ export async function getBookingById(db, bookingId) {
     [bookingId]
   );
 }
+// --- oauth flows (PKCE) ---
+
+export async function createOAuthFlow(db, { nonce, business_id, code_verifier, expires_at_utc }) {
+  const now = new Date().toISOString();
+
+  if (!nonce) throw new Error("createOAuthFlow: missing nonce");
+  if (!business_id) throw new Error("createOAuthFlow: missing business_id");
+  if (!code_verifier) throw new Error("createOAuthFlow: missing code_verifier");
+  if (!expires_at_utc) throw new Error("createOAuthFlow: missing expires_at_utc");
+
+  await run(
+    db,
+    `
+    INSERT INTO oauth_flows (nonce, business_id, code_verifier, created_at_utc, expires_at_utc)
+    VALUES (?, ?, ?, ?, ?)
+    `,
+    [nonce, business_id, code_verifier, now, expires_at_utc]
+  );
+
+  return true;
+}
+
+// consume = получить и удалить (one-time)
+export async function consumeOAuthFlow(db, nonce) {
+  if (!nonce) throw new Error("consumeOAuthFlow: missing nonce");
+
+  try {
+    await run(db, "BEGIN IMMEDIATE");
+
+    const row = await get(
+      db,
+      `
+      SELECT nonce, business_id, code_verifier, created_at_utc, expires_at_utc
+      FROM oauth_flows
+      WHERE nonce = ?
+      `,
+      [nonce]
+    );
+
+    if (!row) {
+      await run(db, "ROLLBACK");
+      return null;
+    }
+
+    await run(db, `DELETE FROM oauth_flows WHERE nonce = ?`, [nonce]);
+
+    await run(db, "COMMIT");
+    return row;
+  } catch (e) {
+    try { await run(db, "ROLLBACK"); } catch {}
+    throw e;
+  }
+}
