@@ -2,6 +2,13 @@
 
 // --- tiny promise helpers ---
 import { encryptToken, decryptToken } from "./src/security/tokens.js";
+
+const isProd = process.env.NODE_ENV === "production";
+if (!process.env.TOKENS_ENC_KEY || process.env.TOKENS_ENC_KEY.length !== 64) {
+  const msg = "TOKENS_ENC_KEY missing/invalid (expected 64 hex chars).";
+  if (isProd) throw new Error(msg);
+  console.warn("WARN:", msg);
+}
 function run(db, sql, params = []) {
   return new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
@@ -140,14 +147,13 @@ export async function upsertGoogleTokens(db, businessId, tokens) {
   // encrypt refresh token if present
   const enc = refresh_token ? encryptToken(refresh_token) : null;
 
-  // IMPORTANT: do not overwrite refresh_token with null
   await run(
     db,
     `
     INSERT INTO google_tokens (
       business_id,
       access_token,
-      refresh_token, -- legacy column (keep for backward compat / optional)
+      refresh_token, -- legacy plaintext column (keep but NEVER insert plaintext)
       refresh_token_enc, refresh_token_iv, refresh_token_tag,
       scope, token_type, expiry_date_utc,
       created_at_utc, updated_at_utc
@@ -156,8 +162,12 @@ export async function upsertGoogleTokens(db, businessId, tokens) {
     ON CONFLICT(business_id) DO UPDATE SET
       access_token         = COALESCE(excluded.access_token, google_tokens.access_token),
 
-      -- legacy plaintext: keep but don't rely on it
-      refresh_token        = COALESCE(excluded.refresh_token, google_tokens.refresh_token),
+      -- legacy plaintext handling:
+      -- If we got a NEW encrypted refresh token, wipe plaintext. Otherwise keep whatever is there (but we won't use it).
+      refresh_token = CASE
+        WHEN excluded.refresh_token_enc IS NOT NULL THEN NULL
+        ELSE google_tokens.refresh_token
+      END,
 
       -- encrypted refresh token: only overwrite if provided
       refresh_token_enc    = COALESCE(excluded.refresh_token_enc, google_tokens.refresh_token_enc),
@@ -172,10 +182,13 @@ export async function upsertGoogleTokens(db, businessId, tokens) {
     [
       businessId,
       access_token,
-      refresh_token, // legacy
+
+      null, // ✅ NEVER store plaintext refresh_token
+
       enc?.enc || null,
       enc?.iv || null,
       enc?.tag || null,
+
       scope,
       token_type,
       expiryIso,
@@ -186,6 +199,70 @@ export async function upsertGoogleTokens(db, businessId, tokens) {
 
   return true;
 }
+export async function getGoogleTokens(db, businessId) {
+  const row = await get(
+    db,
+    `
+    SELECT
+      business_id,
+      access_token,
+      refresh_token, -- legacy (может остаться на переходный период)
+      refresh_token_enc,
+      refresh_token_iv,
+      refresh_token_tag,
+      scope,
+      token_type,
+      expiry_date_utc,
+      created_at_utc,
+      updated_at_utc
+    FROM google_tokens
+    WHERE business_id = ?
+    LIMIT 1
+    `,
+    [businessId]
+  );
+
+  if (!row) return null;
+
+  const anyEncField =
+    row.refresh_token_enc != null ||
+    row.refresh_token_iv != null ||
+    row.refresh_token_tag != null;
+
+  if (anyEncField) {
+    // if any exists, require all 3
+    const encVal = typeof row.refresh_token_enc === "string" ? row.refresh_token_enc.trim() : "";
+const ivVal  = typeof row.refresh_token_iv === "string" ? row.refresh_token_iv.trim() : "";
+const tagVal = typeof row.refresh_token_tag === "string" ? row.refresh_token_tag.trim() : "";
+
+if (!encVal || !ivVal || !tagVal) {
+  throw new Error("Corrupt encrypted refresh token fields (enc/iv/tag mismatch)");
+}
+
+// use trimmed values to decrypt (optional but cleaner)
+row.refresh_token_enc = encVal;
+row.refresh_token_iv = ivVal;
+row.refresh_token_tag = tagVal;
+    try {
+      row.refresh_token = decryptToken({
+        enc: row.refresh_token_enc,
+        iv: row.refresh_token_iv,
+        tag: row.refresh_token_tag,
+      });
+    } catch (e) {
+      throw new Error("Failed to decrypt refresh_token: " + String(e?.message || e));
+    }
+  } else {
+    // legacy fallback (temporary). Your app should not rely on this long-term.
+    row.refresh_token = null;
+  }
+
+  return row;
+}
+  
+// cancel expired pending holds (housekeeping)
+export async function cleanupExpiredPendingHolds(db) {
+  const now = new Date().toISOString();
 
   await run(
     db,
@@ -198,9 +275,9 @@ export async function upsertGoogleTokens(db, businessId, tokens) {
     `,
     [now, now]
   );
+
   return true;
 }
-
 export async function findOverlappingActiveBookings(db, businessId, startUtcIso, endUtcIso) {
   const now = new Date().toISOString();
   // overlap rule: existing.start < new.end AND existing.end > new.start
@@ -478,4 +555,48 @@ export async function consumeOAuthFlow(db, nonce) {
     try { await run(db, "ROLLBACK"); } catch {}
     throw e;
   }
+}
+// one-time migration: move legacy plaintext refresh_token -> encrypted fields
+export async function migrateLegacyRefreshTokens(db) {
+    if (!process.env.TOKENS_ENC_KEY || process.env.TOKENS_ENC_KEY.length !== 64) {
+    throw new Error("migrateLegacyRefreshTokens: TOKENS_ENC_KEY missing/invalid");
+  }
+  const rows = await all(
+    db,
+    `
+    SELECT business_id, refresh_token
+    FROM google_tokens
+    WHERE refresh_token IS NOT NULL
+      AND TRIM(refresh_token) != ''
+      AND (refresh_token_enc IS NULL OR TRIM(refresh_token_enc) = '')
+    `
+  );
+
+  let migrated = 0;
+
+  for (const r of rows) {
+    const enc = encryptToken(r.refresh_token);
+
+    await run(
+      db,
+      `
+      UPDATE google_tokens
+      SET refresh_token = NULL,
+          refresh_token_enc = ?,
+          refresh_token_iv = ?,
+          refresh_token_tag = ?,
+          updated_at_utc = ?
+      WHERE business_id = ?
+      `,
+      [enc.enc, enc.iv, enc.tag, new Date().toISOString(), r.business_id]
+    );
+
+    migrated++;
+  }
+
+  return { ok: true, migrated };
+}
+export async function maybeMigrateLegacyTokens(db) {
+  if (process.env.RUN_TOKEN_MIGRATION !== "1") return { ok: true, skipped: true };
+  return migrateLegacyRefreshTokens(db);
 }
