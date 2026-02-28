@@ -26,6 +26,7 @@ import {
   listTables,
   getGoogleTokens,
   upsertGoogleTokens,
+  maybeMigrateLegacyTokens,
 } from "./db.js";
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -85,7 +86,7 @@ app.get("/debug/db", async (req, res) => {
 
 app.get("/debug/businesses", async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
+    if (!data) return res.status(500).json({ ok: false, error: "DB not ready yet" });
 
     const businesses = await listBusinesses(db);
     res.json({ ok: true, count: businesses.length, businesses });
@@ -100,7 +101,7 @@ app.get("/debug/businesses", async (req, res) => {
  */
 app.get("/debug/create-default-business", async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
+    if (!data) return res.status(500).json({ ok: false, error: "DB not ready yet" });
 
     const name = "Default HVAC (DFW)";
 
@@ -384,13 +385,36 @@ async function revalidateSlotWithGoogle({ calendar, startUtc, endUtc, timeoutMs,
 
 app.post("/api/book", async (req, res) => {
   let bookingIdForLog = null;
-  let businessIdForLog = req?.body?.business_id;
+  let businessIdForLog = req?.body?.business_id || null;
+
+  const log = (phase, msg, extra = {}) => {
+    console.log(JSON.stringify({
+      level: "info",
+      phase,
+      bookingId: bookingIdForLog,
+      business_id: businessIdForLog,
+      msg,
+      ...extra,
+    }));
+  };
+
+  const errorLog = (phase, msg, extra = {}) => {
+    console.error(JSON.stringify({
+      level: "error",
+      phase,
+      bookingId: bookingIdForLog,
+      business_id: businessIdForLog,
+      msg,
+      ...extra,
+    }));
+  };
+
   try {
     if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
     const {
       business_id,
-      start_local,
+      start_local,     // ISO datetime string in business timezone (recommended)
       duration_min,
       customer_name,
       customer_phone,
@@ -402,159 +426,130 @@ app.post("/api/book", async (req, res) => {
     if (!business_id) return res.status(400).json({ ok: false, error: "Missing business_id" });
     if (!start_local) return res.status(400).json({ ok: false, error: "Missing start_local" });
 
-    // --- ids ---
-const bookingId = crypto.randomUUID();
-bookingIdForLog = bookingId;
-businessIdForLog = business_id;
+    businessIdForLog = business_id;
 
-// --- hold expiry ---
-const holdExpiresUtc = DateTime.utc()
-  .plus({ minutes: BOOKING_HOLD_MINUTES })
-  .toISO();
+    // 1) load business to get timezone + defaults
+    const business = await data.getBusinessById(business_id);
+    if (!business) return res.status(404).json({ ok: false, error: "Business not found" });
 
-// cleanup expired holds (safe)
-await data.cleanupExpiredHolds(business_id);
+    const tz = business.timezone || "America/Chicago";
 
-// Create pending hold atomically (this already checks overlap inside TX)
-const holdResult = await data.createPendingHoldIfAvailableTx({
-  id: bookingId,
-  business_id,
-  start_utc: startUtc,
-  end_utc: endUtc,
-  hold_expires_at_utc: holdExpiresUtc,
-  customer_name,
-  customer_phone,
-  customer_email,
-  job_summary: job_summary || (address ? `Address: ${address}` : null),
-});
+    const durMin = Number(
+      duration_min != null ? duration_min : (business.default_duration_min || 60)
+    );
+    if (!Number.isFinite(durMin) || durMin <= 0 || durMin > 8 * 60) {
+      return res.status(400).json({ ok: false, error: "Bad duration_min" });
+    }
 
-if (!holdResult?.ok) {
-  log("hold", "Slot already taken (TX overlap)", {});
-  return res.status(409).json({ ok: false, error: "Slot already taken" });
-}
+    // 2) parse requested slot in business timezone
+    const startZ = DateTime.fromISO(String(start_local), { zone: tz });
+    if (!startZ.isValid) {
+      return res.status(400).json({ ok: false, error: "Bad start_local (use ISO datetime)" });
+    }
+    const endZ = startZ.plus({ minutes: durMin });
 
-log("hold", "Pending hold created", { holdExpiresUtc });
+    const startUtc = startZ.toUTC().toISO();
+    const endUtc = endZ.toUTC().toISO();
+
+    // 3) create booking id + hold
+    const bookingId = crypto.randomUUID();
+    bookingIdForLog = bookingId;
+
+    const holdExpiresUtc = DateTime.utc().plus({ minutes: BOOKING_HOLD_MINUTES }).toISO();
+
+    // cleanup expired holds
+    if (typeof data.cleanupExpiredPendingHolds === "function") {
+      await data.cleanupExpiredPendingHolds();
+    } else if (typeof data.cleanupExpiredPendingHolds === "undefined" && typeof data.cleanupExpiredPendingHolds !== "function") {
+      // if your data layer uses a different name, rename it there to cleanupExpiredPendingHolds
+      log("warn", "cleanupExpiredPendingHolds not found on data layer (skipped)");
+    }
+
+    log("hold", "Creating pending hold", { startUtc, endUtc, holdExpiresUtc });
+
+    const holdResult = await data.createPendingHoldIfAvailableTx({
+      id: bookingId,
+      business_id,
+      start_utc: startUtc,
+      end_utc: endUtc,
+      hold_expires_at_utc: holdExpiresUtc,
+      customer_name: customer_name || null,
+      customer_phone: customer_phone || null,
+      customer_email: customer_email || null,
+      job_summary: job_summary || (address ? `Address: ${address}` : null),
+    });
 
     if (!holdResult?.ok) {
+      log("hold", "Slot already taken (overlap)");
       return res.status(409).json({ ok: false, error: "Slot already taken" });
     }
 
+    log("hold", "Pending hold created");
+
+    // 4) Google: load tokens + revalidate busy
     const oauth2Client = makeOAuthClient();
     await loadTokensIntoClientForBusiness(data, oauth2Client, business_id);
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
 
-    const fb = await calendar.freebusy.query({
-      requestBody: {
-        timeMin: startUtc,
-        timeMax: endUtc,
-        timeZone: "UTC",
-        items: [{ id: "primary" }],
-      },
+    const { isBusy } = await revalidateSlotWithGoogle({
+      calendar,
+      startUtc,
+      endUtc,
+      timeoutMs: GOOGLE_API_TIMEOUT_MS,
+      bookingId,
+      businessId: business_id,
+      log,
     });
 
-    const busyIntervals = fb?.data?.calendars?.primary?.busy || [];
-    const slotBusy = busyIntervals.some((interval) => {
-      const busyStart = Date.parse(interval.start);
-      const busyEnd = Date.parse(interval.end);
-      const reqStart = Date.parse(startUtc);
-      const reqEnd = Date.parse(endUtc);
-      return Number.isFinite(busyStart)
-        && Number.isFinite(busyEnd)
-        && busyStart < reqEnd
-        && busyEnd > reqStart;
-    });
-
-    if (slotBusy) {
+    if (isBusy) {
       await data.failBooking(bookingId, "google_freebusy_busy");
-      return res.status(409).json({ ok: false, error: "Slot is busy in Google Calendar; booking hold released" });
+      log("fail", "Slot busy in Google calendar");
+      return res.status(409).json({ ok: false, error: "Slot busy in Google calendar" });
     }
 
-    const created = await calendar.events.insert({
-      calendarId: "primary",
-      requestBody: {
-        summary: job_summary || "HVAC Service",
-        description: [
-          customer_name ? `Name: ${customer_name}` : null,
-          customer_phone ? `Phone: ${customer_phone}` : null,
-          customer_email ? `Email: ${customer_email}` : null,
-          address ? `Address: ${address}` : null,
-        ].filter(Boolean).join("\n"),
-        start: { dateTime: startZ.toISO(), timeZone: tz },
-        end: { dateTime: endZ.toISO(), timeZone: tz },
-      },
+    // 5) Create event
+    log("insert", "Creating Google Calendar event");
+
+    const created = await withTimeout(
+      calendar.events.insert({
+        calendarId: "primary",
+        requestBody: {
+          summary: job_summary || "HVAC Service",
+          description: [
+            customer_name ? `Name: ${customer_name}` : null,
+            customer_phone ? `Phone: ${customer_phone}` : null,
+            customer_email ? `Email: ${customer_email}` : null,
+            address ? `Address: ${address}` : null,
+          ].filter(Boolean).join("\n"),
+          start: { dateTime: startZ.toISO(), timeZone: tz },
+          end: { dateTime: endZ.toISO(), timeZone: tz },
+        },
+      }),
+      GOOGLE_API_TIMEOUT_MS,
+      "google.events.insert"
+    );
+
+    await data.confirmBooking(bookingId, created.data.id);
+    log("confirm", "Booking confirmed", { gcal_event_id: created.data.id });
+
+    return res.json({
+      ok: true,
+      bookingId,
+      status: "confirmed",
+      gcal_event_id: created.data.id,
+      start_local: startZ.toISO(),
+      end_local: endZ.toISO(),
+      timezone: tz,
     });
 
-    const failAndRespond502 = async (reason) => {
-      await markFailedBooking(reason);
-      errorLog("fail", "Google booking failed; hold released", { reason });
-      return res.status(502).json({ ok: false, error: `Google booking failed; hold released: ${reason}` });
-    };
-
-    try {
-      log("oauth", "Loading Google OAuth tokens");
-      const oauth2Client = makeOAuthClient();
-      await loadTokensIntoClientForBusiness(data, oauth2Client, business_id);
-
-      const calendar = google.calendar({ version: "v3", auth: oauth2Client });
-
-      const { isBusy } = await revalidateSlotWithGoogle({
-        calendar,
-        startUtc,
-        endUtc,
-        timeoutMs: GOOGLE_API_TIMEOUT_MS,
-        bookingId,
-        businessId: business_id,
-        log,
-      });
-
-      if (isBusy) {
-        await markFailedBooking("Slot busy in Google calendar");
-        log("fail", "Slot busy in Google calendar during revalidation");
-        return res.status(409).json({ ok: false, error: "Slot busy in Google calendar" });
-      }
-
-      log("insert", "Creating Google Calendar event");
-      const created = await withTimeout(
-        calendar.events.insert({
-          calendarId: "primary",
-          requestBody: {
-            summary: job_summary || "HVAC Service",
-            description: [
-              customer_name ? `Name: ${customer_name}` : null,
-              customer_phone ? `Phone: ${customer_phone}` : null,
-              customer_email ? `Email: ${customer_email}` : null,
-              address ? `Address: ${address}` : null,
-            ].filter(Boolean).join("\n"),
-            start: { dateTime: startZ.toISO(), timeZone: tz },
-            end: { dateTime: endZ.toISO(), timeZone: tz },
-          },
-        }),
-        GOOGLE_API_TIMEOUT_MS,
-        "google.events.insert"
-      );
-
-      await data.confirmBooking(bookingId, created.data.id);
-      log("confirm", "Booking confirmed", { gcal_event_id: created.data.id });
-
-      return res.json({
-        ok: true,
-        bookingId,
-        status: "confirmed",
-        gcal_event_id: created.data.id,
-      });
-    } catch (googleErr) {
-      const reason = String(googleErr?.message || googleErr);
-      return await failAndRespond502(reason);
-    }
   } catch (e) {
-    console.error(JSON.stringify({
-      level: "error",
-      phase: "fail",
-      bookingId: bookingIdForLog,
-      business_id: businessIdForLog,
-      msg: "book error",
-      error: String(e?.message || e),
-    }));
+    errorLog("exception", "book error", { error: String(e?.message || e) });
+
+    // best-effort: don't leave pending holds hanging
+    if (bookingIdForLog && data?.failBooking) {
+      try { await data.failBooking(bookingIdForLog, "server_exception"); } catch {}
+    }
+
     return res.status(500).json({ ok: false, error: "Internal error" });
   }
 });
@@ -703,7 +698,7 @@ async function start() {
   console.log("Starting server...");
 
   // init sqlite + migrations
-  db = openDb();
+  db = await openDb();
   await runMigrations(db);
 
   // init data layer (sqlite now, later postgres)
@@ -713,6 +708,11 @@ async function start() {
   console.log("DB_DIALECT =", dl.dialect);
   console.log("✅ Data layer ready");
   console.log("✅ Migrations completed");
+
+  // ✅ ONE-TIME migration for legacy plaintext refresh_token -> encrypted fields
+  // controlled by RUN_TOKEN_MIGRATION=1
+  const migRes = await maybeMigrateLegacyTokens(db);
+  console.log("Token migration result:", migRes);
 
   server.listen(PORT, () => {
     console.log("Voice assistant is running 🚀 on port", PORT);
