@@ -4,4 +4,6 @@ data.sqlite
 *.sqlite
 .DS_Store
 npm-debug.log*
-
+.env.*
+*.db
+*.sqlite-journal
