@@ -13,6 +13,15 @@ import {
 
   // debug
   listTables,
+
+  // bookings
+  cleanupExpiredHolds,
+  findOverlappingActiveBookings,
+  createPendingHold,
+  createPendingHoldIfAvailableTx,
+  confirmBooking,
+  failBooking,
+  cancelBooking,
 } from "../../db.js";
 
 // адаптер: превращаем функции вида (db, ...) в методы data-layer вида (...) с замкнутым db
@@ -33,5 +42,15 @@ export function makeSqliteData(db) {
     getGoogleTokens: (businessId) => getGoogleTokens(db, businessId),
     upsertGoogleTokens: (businessId, tokens) => upsertGoogleTokens(db, businessId, tokens),
     assertBusinessExists: (businessId) => assertBusinessExists(db, businessId),
+
+    // bookings
+    cleanupExpiredHolds: (businessId) => cleanupExpiredHolds(db, businessId),
+    findOverlappingActiveBookings: (businessId, startUtcIso, endUtcIso) =>
+      findOverlappingActiveBookings(db, businessId, startUtcIso, endUtcIso),
+    createPendingHold: (payload) => createPendingHold(db, payload),
+    createPendingHoldIfAvailableTx: (payload) => createPendingHoldIfAvailableTx(db, payload),
+    confirmBooking: (bookingId, gcalEventId) => confirmBooking(db, bookingId, gcalEventId),
+    failBooking: (bookingId, reason) => failBooking(db, bookingId, reason),
+    cancelBooking: (bookingId) => cancelBooking(db, bookingId),
   };
 }
