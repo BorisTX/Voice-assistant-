@@ -1,6 +1,7 @@
 // db.js (multi-tenant only; uses the db instance from openDb())
 
 // --- tiny promise helpers ---
+import { encryptToken, decryptToken } from "./src/security/tokens.js";
 function run(db, sql, params = []) {
   return new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
@@ -136,27 +137,45 @@ export async function upsertGoogleTokens(db, businessId, tokens) {
   const expiryIso =
     typeof expiry_date === "number" ? new Date(expiry_date).toISOString() : null;
 
+  // encrypt refresh token if present
+  const enc = refresh_token ? encryptToken(refresh_token) : null;
+
   // IMPORTANT: do not overwrite refresh_token with null
   await run(
     db,
     `
     INSERT INTO google_tokens (
-      business_id, access_token, refresh_token, scope, token_type, expiry_date_utc,
+      business_id,
+      access_token,
+      refresh_token, -- legacy column (keep for backward compat / optional)
+      refresh_token_enc, refresh_token_iv, refresh_token_tag,
+      scope, token_type, expiry_date_utc,
       created_at_utc, updated_at_utc
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(business_id) DO UPDATE SET
-      access_token    = COALESCE(excluded.access_token, google_tokens.access_token),
-      refresh_token   = COALESCE(excluded.refresh_token, google_tokens.refresh_token),
-      scope           = COALESCE(excluded.scope, google_tokens.scope),
-      token_type      = COALESCE(excluded.token_type, google_tokens.token_type),
-      expiry_date_utc = COALESCE(excluded.expiry_date_utc, google_tokens.expiry_date_utc),
-      updated_at_utc  = excluded.updated_at_utc
+      access_token         = COALESCE(excluded.access_token, google_tokens.access_token),
+
+      -- legacy plaintext: keep but don't rely on it
+      refresh_token        = COALESCE(excluded.refresh_token, google_tokens.refresh_token),
+
+      -- encrypted refresh token: only overwrite if provided
+      refresh_token_enc    = COALESCE(excluded.refresh_token_enc, google_tokens.refresh_token_enc),
+      refresh_token_iv     = COALESCE(excluded.refresh_token_iv,  google_tokens.refresh_token_iv),
+      refresh_token_tag    = COALESCE(excluded.refresh_token_tag, google_tokens.refresh_token_tag),
+
+      scope                = COALESCE(excluded.scope, google_tokens.scope),
+      token_type           = COALESCE(excluded.token_type, google_tokens.token_type),
+      expiry_date_utc      = COALESCE(excluded.expiry_date_utc, google_tokens.expiry_date_utc),
+      updated_at_utc       = excluded.updated_at_utc
     `,
     [
       businessId,
       access_token,
-      refresh_token,
+      refresh_token, // legacy
+      enc?.enc || null,
+      enc?.iv || null,
+      enc?.tag || null,
       scope,
       token_type,
       expiryIso,
@@ -167,53 +186,6 @@ export async function upsertGoogleTokens(db, businessId, tokens) {
 
   return true;
 }
-
-export async function getGoogleTokens(db, businessId) {
-  return get(
-    db,
-    `
-    SELECT business_id, access_token, refresh_token, scope, token_type,
-           expiry_date_utc, created_at_utc, updated_at_utc
-    FROM google_tokens
-    WHERE business_id = ?
-    `,
-    [businessId]
-  );
-}
-
-export async function assertBusinessExists(db, businessId) {
-  const row = await get(db, `SELECT id FROM businesses WHERE id = ?`, [businessId]);
-  if (!row) throw new Error(`Unknown business_id: ${businessId}`);
-  return true;
-}
-
-// --- debug helpers ---
-export async function listTables(db) {
-  const rows = await all(
-    db,
-    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-  );
-  return rows.map((r) => r.name);
-}
-// --- bookings (holds + confirm) ---
-
-export async function cleanupExpiredHolds(db, businessId = null) {
-  const now = new Date().toISOString();
-  if (businessId) {
-    await run(
-      db,
-      `
-      UPDATE bookings
-      SET status = 'cancelled', updated_at_utc = ?
-      WHERE business_id = ?
-        AND status = 'pending'
-        AND hold_expires_at_utc IS NOT NULL
-        AND hold_expires_at_utc <= ?
-      `,
-      [now, businessId, now]
-    );
-    return true;
-  }
 
   await run(
     db,
