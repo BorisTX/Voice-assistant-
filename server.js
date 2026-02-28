@@ -1,4 +1,3 @@
-// server.js
 import "dotenv/config";
 
 import express from "express";
@@ -7,6 +6,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import crypto from "crypto";
 import { google } from "googleapis";
 import { DateTime } from "luxon";
+
 import { verifyOAuthState } from "./src/security/state.js";
 import { normalizeBusyUtc, generateSlots } from "./src/slots.js";
 import { openDb, runMigrations } from "./src/db/migrate.js";
@@ -18,16 +18,13 @@ import {
   loadTokensIntoClientForBusiness,
   exchangeCodeAndStoreForBusiness,
 } from "./googleAuth.js";
+
+// raw helpers only (debug + one-time token migration)
 import {
-  getBusinessById,
-  getBusinessByName,
-  insertBusiness,
-  listBusinesses,
   listTables,
-  getGoogleTokens,
-  upsertGoogleTokens,
   maybeMigrateLegacyTokens,
 } from "./db.js";
+
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
@@ -86,9 +83,9 @@ app.get("/debug/db", async (req, res) => {
 
 app.get("/debug/businesses", async (req, res) => {
   try {
-    if (!data) return res.status(500).json({ ok: false, error: "DB not ready yet" });
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
-    const businesses = await listBusinesses(db);
+    const businesses = await data.listBusinesses();
     res.json({ ok: true, count: businesses.length, businesses });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -284,7 +281,7 @@ app.get("/debug/calendar-business", async (req, res) => {
 // --------------------
 app.get("/api/available-slots", async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ ok: false, error: "DB not ready yet" });
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
     const businessId = String(req.query.business_id || "");
     if (!businessId) return res.status(400).json({ ok: false, error: "Missing business_id" });
