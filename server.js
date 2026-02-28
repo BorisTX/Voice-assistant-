@@ -402,63 +402,38 @@ app.post("/api/book", async (req, res) => {
     if (!business_id) return res.status(400).json({ ok: false, error: "Missing business_id" });
     if (!start_local) return res.status(400).json({ ok: false, error: "Missing start_local" });
 
-    const bookingId = crypto.randomUUID();
-    bookingIdForLog = bookingId;
-    businessIdForLog = business_id;
-    const log = (phase, msg, extra = {}) => {
-      console.log(JSON.stringify({ level: "info", phase, bookingId, business_id, msg, ...extra }));
-    };
-    const errorLog = (phase, msg, extra = {}) => {
-      console.error(JSON.stringify({ level: "error", phase, bookingId, business_id, msg, ...extra }));
-    };
+    // --- ids ---
+const bookingId = crypto.randomUUID();
+bookingIdForLog = bookingId;
+businessIdForLog = business_id;
 
-    log("validate", "Book request received");
+// --- hold expiry ---
+const holdExpiresUtc = DateTime.utc()
+  .plus({ minutes: BOOKING_HOLD_MINUTES })
+  .toISO();
 
-    const business = await data.getBusinessById(business_id);
-    if (!business) return res.status(404).json({ ok: false, error: "Business not found" });
+// cleanup expired holds (safe)
+await data.cleanupExpiredHolds(business_id);
 
-    const tz = business.timezone || "America/Chicago";
-    const durMin = Number(duration_min || business.default_duration_min || 60);
-    if (!Number.isFinite(durMin) || durMin <= 0 || durMin > 8 * 60) {
-      return res.status(400).json({ ok: false, error: "Bad duration_min" });
-    }
+// Create pending hold atomically (this already checks overlap inside TX)
+const holdResult = await data.createPendingHoldIfAvailableTx({
+  id: bookingId,
+  business_id,
+  start_utc: startUtc,
+  end_utc: endUtc,
+  hold_expires_at_utc: holdExpiresUtc,
+  customer_name,
+  customer_phone,
+  customer_email,
+  job_summary: job_summary || (address ? `Address: ${address}` : null),
+});
 
-    const startZ = DateTime.fromISO(start_local, { zone: tz });
-    if (!startZ.isValid) {
-      return res.status(400).json({ ok: false, error: "Bad start_local" });
-    }
+if (!holdResult?.ok) {
+  log("hold", "Slot already taken (TX overlap)", {});
+  return res.status(409).json({ ok: false, error: "Slot already taken" });
+}
 
-    const endZ = startZ.plus({ minutes: durMin });
-    const startUtc = startZ.toUTC().toISO();
-    const endUtc = endZ.toUTC().toISO();
-    log("validate", "Booking request validated", { startUtc, endUtc, durMin });
-
-    bookingId = crypto.randomUUID();
-    const holdExpiresUtc = DateTime.utc().plus({ minutes: 5 }).toISO();
-    // cleanup expired holds
-    await data.cleanupExpiredHolds(business_id);
-
-    // DB overlap check
-    const overlaps = await data.findOverlappingActiveBookings(business_id, startUtc, endUtc);
-    if (overlaps.length > 0) {
-      log("hold", "Slot already taken in DB", { overlapCount: overlaps.length });
-      return res.status(409).json({ ok: false, error: "Slot already taken" });
-    }
-
-    const holdExpiresUtc = DateTime.utc().plus({ minutes: BOOKING_HOLD_MINUTES }).toISO();
-
-    const holdResult = await data.createPendingHoldIfAvailableTx({
-      id: bookingId,
-      business_id,
-      start_utc: startUtc,
-      end_utc: endUtc,
-      hold_expires_at_utc: holdExpiresUtc,
-      customer_name,
-      customer_phone,
-      customer_email,
-      job_summary: job_summary || (address ? `Address: ${address}` : null),
-    });
-    log("hold", "Pending hold created", { holdExpiresUtc });
+log("hold", "Pending hold created", { holdExpiresUtc });
 
     if (!holdResult?.ok) {
       return res.status(409).json({ ok: false, error: "Slot already taken" });
