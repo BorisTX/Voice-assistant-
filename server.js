@@ -68,7 +68,7 @@ app.get("/healthz", (req, res) => {
 });
 
 app.get("/readyz", (req, res) => {
-  const ready = isReady && !isShuttingDown && server?.listening;
+  const ready = isReady && !isShuttingDown && server && server.listening;
   if (!ready) {
     return res.status(503).json({ ok: false });
   }
@@ -836,8 +836,22 @@ app.use((req, res) => {
 // --------------------
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/media" });
+const activeSockets = new Set();
+const activeWsClients = new Set();
+
+server.on("connection", (socket) => {
+  activeSockets.add(socket);
+  socket.on("close", () => {
+    activeSockets.delete(socket);
+  });
+});
 
 wss.on("connection", (twilioWs) => {
+  activeWsClients.add(twilioWs);
+  twilioWs.on("close", () => {
+    activeWsClients.delete(twilioWs);
+  });
+
   console.log("Twilio connected");
   let streamSid = null;
 
@@ -942,6 +956,7 @@ const SHUTDOWN_POLL_MS = 250;
 
 let db;    // raw connection
 let data;  // data layer
+let retryIntervalId;
 
 function closeDbGracefully() {
   if (!db || typeof db.close !== "function") return Promise.resolve();
@@ -988,12 +1003,42 @@ async function shutdown(signal) {
   }, SHUTDOWN_TIMEOUT_MS);
 
   try {
+    console.log("closing ws");
+    const wsClosed = new Promise((resolve) => {
+      wss.close(() => resolve());
+    });
+
+    for (const client of activeWsClients) {
+      try { client.close(); } catch {}
+    }
+
+    setTimeout(() => {
+      for (const client of activeWsClients) {
+        try { client.terminate(); } catch {}
+      }
+    }, SHUTDOWN_POLL_MS * 2);
+
+    await wsClosed;
+
+    console.log("cleared retry interval");
+    if (retryIntervalId) {
+      clearInterval(retryIntervalId);
+      retryIntervalId = undefined;
+    }
+
     await new Promise((resolve) => {
       server.close(() => {
         console.log("HTTP server closed (no longer accepting new connections)");
         resolve();
       });
     });
+
+    setTimeout(() => {
+      console.log("destroying sockets");
+      for (const socket of activeSockets) {
+        try { socket.destroy(); } catch {}
+      }
+    }, SHUTDOWN_POLL_MS * 2);
 
     await waitForActiveRequestsToDrain();
     await closeDbGracefully();
@@ -1043,7 +1088,7 @@ async function start() {
 
 
   if (process.env.RUN_RETRY_WORKER === "1") {
-    setInterval(() => {
+    retryIntervalId = setInterval(() => {
       runRetriesOnce({ data, limit: 20 }).catch((e) => {
         console.error("retry worker tick failed", e);
       });
