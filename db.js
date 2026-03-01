@@ -292,8 +292,8 @@ export async function findOverlappingActiveBookings(db, businessId, startUtcIso,
         status = 'confirmed'
         OR (status = 'pending' AND (hold_expires_at_utc IS NULL OR hold_expires_at_utc > ?))
       )
-      AND start_utc < ?
-      AND end_utc > ?
+      AND COALESCE(overlap_start_utc, start_utc) < ?
+      AND COALESCE(overlap_end_utc, end_utc) > ?
     ORDER BY start_utc ASC
     LIMIT 10
     `,
@@ -308,6 +308,8 @@ export async function createPendingHold(db, payload) {
     business_id,
     start_utc,
     end_utc,
+    overlap_start_utc = start_utc,
+    overlap_end_utc = end_utc,
     hold_expires_at_utc,
     customer_name = null,
     customer_phone = null,
@@ -325,18 +327,21 @@ export async function createPendingHold(db, payload) {
     INSERT INTO bookings (
       id, business_id,
       start_utc, end_utc,
+      overlap_start_utc, overlap_end_utc,
       status, hold_expires_at_utc,
       customer_name, customer_phone, customer_email,
       job_summary,
       gcal_event_id,
       created_at_utc, updated_at_utc
-    ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, ?, ?)
     `,
     [
       id,
       business_id,
       start_utc,
       end_utc,
+      overlap_start_utc,
+      overlap_end_utc,
       hold_expires_at_utc,
       customer_name,
       customer_phone,
@@ -357,6 +362,8 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
     business_id,
     start_utc,
     end_utc,
+    overlap_start_utc = start_utc,
+    overlap_end_utc = end_utc,
     hold_expires_at_utc,
     customer_name = null,
     customer_phone = null,
@@ -394,11 +401,11 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
           status = 'confirmed'
           OR (status = 'pending' AND (hold_expires_at_utc IS NULL OR hold_expires_at_utc > ?))
         )
-        AND start_utc < ?
-        AND end_utc > ?
+        AND COALESCE(overlap_start_utc, start_utc) < ?
+        AND COALESCE(overlap_end_utc, end_utc) > ?
       LIMIT 1
       `,
-      [business_id, now, end_utc, start_utc]
+      [business_id, now, overlap_end_utc, overlap_start_utc]
     );
 
     if (overlap) {
@@ -412,18 +419,21 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
       INSERT INTO bookings (
         id, business_id,
         start_utc, end_utc,
+        overlap_start_utc, overlap_end_utc,
         status, hold_expires_at_utc,
         customer_name, customer_phone, customer_email,
         job_summary,
         gcal_event_id,
         created_at_utc, updated_at_utc
-      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, ?, ?)
       `,
       [
         id,
         business_id,
         start_utc,
         end_utc,
+        overlap_start_utc,
+        overlap_end_utc,
         hold_expires_at_utc,
         customer_name,
         customer_phone,
