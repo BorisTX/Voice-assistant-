@@ -1,6 +1,7 @@
 const BASE_URL = process.env.BASE_URL || "http://127.0.0.1:10000";
 const BUSINESS_ID = process.env.BUSINESS_ID;
 const START_LOCAL = process.env.START_LOCAL;
+const TIMEZONE = process.env.TIMEZONE || "America/Chicago";
 const DURATION_MIN = Number(process.env.DURATION_MIN || 60);
 const N = 10;
 
@@ -15,19 +16,24 @@ if (!START_LOCAL) {
 }
 
 const payload = {
-  business_id: BUSINESS_ID,
-  start_local: START_LOCAL,
-  duration_min: DURATION_MIN,
-  customer_name: "Concurrency Test",
-  customer_phone: "+15555550100",
-  customer_email: "concurrency-test@example.com",
-  address: "123 Test St",
-  job_summary: "Parallel booking race test",
+  businessId: BUSINESS_ID,
+  startLocal: START_LOCAL,
+  timezone: TIMEZONE,
+  durationMins: DURATION_MIN,
+  bufferMins: 15,
+  service: "repair",
+  customer: {
+    name: "Concurrency Test",
+    phone: "+15555550100",
+    email: "concurrency-test@example.com",
+    address: "123 Test St",
+  },
+  notes: "Parallel booking race test",
 };
 
 async function attempt(index) {
   try {
-    const res = await fetch(`${BASE_URL}/api/book`, {
+    const res = await fetch(`${BASE_URL}/api/bookings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -43,7 +49,7 @@ async function attempt(index) {
 }
 
 async function main() {
-  console.log(`Running ${N} parallel requests against ${BASE_URL}/api/book`);
+  console.log(`Running ${N} parallel requests against ${BASE_URL}/api/bookings`);
   const results = await Promise.all(Array.from({ length: N }, (_, i) => attempt(i + 1)));
 
   let success = 0;
