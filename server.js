@@ -113,14 +113,6 @@ app.get("/readyz", (req, res) => {
   return res.status(200).json({ ok: true });
 });
 
-app.use((req, res, next) => {
-  const isHealthPath = req.path === "/healthz" || req.path === "/readyz";
-  if (!isHealthPath) {
-    console.log("INCOMING:", req.method, req.url);
-  }
-  next();
-});
-
 const GOOGLE_API_TIMEOUT_MS_DEFAULT = 10000;
 
 function nowMs() {
@@ -152,7 +144,15 @@ function withTimeout(promise, ms, label) {
     })
     .catch((error) => {
       const duration_ms = Math.round(nowMs() - t0);
-      console.error(JSON.stringify({ op: label, ok: false, duration_ms, error: String(error?.message || error) }));
+      console.error(JSON.stringify({
+        level: "error",
+        type: "google_api",
+        requestId: null,
+        op: label,
+        ok: false,
+        duration_ms,
+        error: String(error?.message || error),
+      }));
       throw error;
     })
     .finally(() => {
@@ -925,7 +925,7 @@ app.post("/voice", async (req, res) => {
 });
 
 app.use((req, res) => {
-  console.log("404:", req.method, req.url);
+  console.log(JSON.stringify({ level: "info", type: "not_found", requestId: req.requestId, method: req.method, path: req.path }));
   res.status(404).json({ ok: false, error: "Not Found" });
 });
 
@@ -955,7 +955,12 @@ wss.on("connection", (twilioWs) => {
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    console.error("OPENAI_API_KEY is missing in environment variables!");
+    console.error(JSON.stringify({
+      level: "error",
+      type: "websocket",
+      requestId: null,
+      msg: "OPENAI_API_KEY is missing in environment variables",
+    }));
     try { twilioWs.close(); } catch {}
     return;
   }
@@ -995,7 +1000,13 @@ wss.on("connection", (twilioWs) => {
   });
 
   openaiWs.on("error", (err) => {
-    console.error("OpenAI WS error:", err);
+    console.error(JSON.stringify({
+      level: "error",
+      type: "websocket",
+      requestId: null,
+      msg: "OpenAI WS error",
+      error: String(err?.message || err),
+    }));
   });
 
   twilioWs.on("message", (message) => {
@@ -1195,7 +1206,13 @@ async function start() {
   if (process.env.RUN_RETRY_WORKER === "1") {
     retryIntervalId = setInterval(() => {
       runRetriesOnce({ data, limit: 20 }).catch((e) => {
-        console.error("retry worker tick failed", e);
+        console.error(JSON.stringify({
+          level: "error",
+          type: "retry_worker",
+          requestId: null,
+          msg: "retry worker tick failed",
+          error: String(e?.message || e),
+        }));
       });
     }, 15_000);
     console.log("Retry worker enabled");
@@ -1210,6 +1227,12 @@ async function start() {
 }
 
 start().catch((err) => {
-  console.error("❌ Startup failed:", err);
+  console.error(JSON.stringify({
+    level: "error",
+    type: "startup",
+    requestId: null,
+    msg: "Startup failed",
+    error: String(err?.message || err),
+  }));
   process.exit(1);
 });
