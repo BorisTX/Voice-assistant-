@@ -1008,7 +1008,10 @@ async function shutdown(signal) {
       retryIntervalId = undefined;
     }
 
-    const serverClosed = new Promise((resolve) => server?.close?.(() => resolve()) ?? resolve());
+    const serverClosed = new Promise((resolve) => {
+      if (!server || typeof server.close !== "function") return resolve();
+      server.close(() => resolve());
+    });
 
     if (wss && typeof wss.close === "function") {
       try {
