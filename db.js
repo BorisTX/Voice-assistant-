@@ -600,3 +600,12 @@ export async function maybeMigrateLegacyTokens(db) {
   if (process.env.RUN_TOKEN_MIGRATION !== "1") return { ok: true, skipped: true };
   return migrateLegacyRefreshTokens(db);
 }
+export async function assertBusinessExists(db, businessId) {
+  const business = await getBusinessById(db, businessId);
+  if (!business) {
+    const err = new Error(`Business not found: ${businessId}`);
+    err.code = "BUSINESS_NOT_FOUND";
+    throw err;
+  }
+  return business;
+}
