@@ -209,6 +209,10 @@ export async function createBookingFlow({
       phoneDigits: normalizePhoneDigits(input.customer?.phone),
     });
 
+    if (typeof data.cleanupExpiredHolds === "function") {
+      await data.cleanupExpiredHolds(input.businessId);
+    }
+
     const existingBooking = await data.getBookingByIdempotencyKey(input.businessId, idempotencyKey);
     if (existingBooking) {
       if (existingBooking.status === "confirmed") {
@@ -238,11 +242,6 @@ export async function createBookingFlow({
     });
 
     const isEmergency = isEmergencyService || isAfterHours || input.emergencyFlag;
-
-    if (typeof data.cleanupExpiredHolds === "function") {
-      await data.cleanupExpiredHolds(input.businessId);
-    }
-
     const slotKey = `${input.businessId}:${schedule.startUtcIso}`;
     log("info", "hold", "Creating pending hold", {
       startUtc: schedule.startUtcIso,

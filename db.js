@@ -517,7 +517,14 @@ export async function getBookingByIdempotencyKey(db, businessId, idempotencyKey)
     FROM bookings
     WHERE business_id = ?
       AND idempotency_key = ?
-      AND status IN ('pending','confirmed')
+      AND (
+        status = 'confirmed'
+        OR (
+          status = 'pending'
+          AND hold_expires_at_utc IS NOT NULL
+          AND julianday(hold_expires_at_utc) > julianday('now')
+        )
+      )
     ORDER BY created_at_utc DESC
     LIMIT 1
     `,
