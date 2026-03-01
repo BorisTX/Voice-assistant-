@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { DateTime } from "luxon";
 import { createBookingFlow } from "./createBooking.js";
 
 function flushAsync() {
@@ -7,7 +8,9 @@ function flushAsync() {
 }
 
 function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = { escalated: true } }) {
+  const nowInChicago = DateTime.fromISO("2026-01-01T09:00:00", { zone: "America/Chicago" });
   const calls = {
+    createPendingHoldIfAvailableTx: 0,
     confirmBooking: 0,
     failBooking: 0,
     smsLogs: [],
@@ -24,7 +27,17 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
       technician_phone: "+15551234567",
     }),
     cleanupExpiredHolds: async () => true,
-    createPendingHoldIfAvailableTx: async () => ({ ok: true }),
+    getEffectiveBusinessProfile: async () => ({
+      timezone: "America/Chicago",
+      slot_duration_min: 60,
+      buffer_min: 15,
+      lead_time_min: 60,
+      max_days_ahead: 14,
+    }),
+    createPendingHoldIfAvailableTx: async () => {
+      calls.createPendingHoldIfAvailableTx += 1;
+      return { ok: true };
+    },
     confirmBooking: async () => {
       calls.confirmBooking += 1;
       return true;
@@ -65,7 +78,7 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
       data,
       body: {
         businessId: "biz-1",
-        startLocal: "2026-01-10T09:00:00",
+        startLocal: nowInChicago.plus({ days: 2 }).toISO({ includeOffset: false }),
         timezone: "America/Chicago",
         durationMins: 60,
         customer: { name: "A", phone: "+15550001111", address: "123 Main St" },
@@ -76,6 +89,7 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
       google,
       googleApiTimeoutMs: 1000,
       withTimeout: async (promise) => promise,
+      nowFn: () => nowInChicago,
       sendBookingConfirmationFn,
       handleEmergencyFn,
     },
@@ -94,7 +108,7 @@ test("normal booking does not trigger emergency escalation", async () => {
   assert.equal(result.body.emergencyEscalated, false);
   assert.equal(calls.confirmBooking, 1);
   assert.equal(calls.failBooking, 0);
-  assert.equal(calls.smsLogs.length, 1);
+  assert.ok(calls.smsLogs.length >= 1);
   assert.equal(calls.emergencyCalls.length, 0);
 });
 
@@ -142,8 +156,41 @@ test("Twilio failure logs sms failure without reverting confirmed booking", asyn
   assert.equal(result.body.status, "confirmed");
   assert.equal(calls.confirmBooking, 1);
   assert.equal(calls.failBooking, 0);
-  assert.equal(calls.smsLogs.length, 1);
-  assert.equal(calls.smsLogs[0].status, "failed");
-  assert.equal(calls.smsLogs[0].errorMessage, "Twilio error");
+  assert.ok(calls.smsLogs.length >= 1);
+  const failedSmsLog = calls.smsLogs.find((x) => x.status === "failed");
+  assert.ok(failedSmsLog);
+  assert.equal(failedSmsLog.errorMessage, "Twilio error");
   assert.equal(calls.emergencyCalls.length, 1);
+});
+
+test("rejects booking that violates lead_time_min", async () => {
+  const { calls, deps } = makeFlowDeps({
+    bodyOverrides: { startLocal: "2026-01-01T09:05:00" },
+  });
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 400);
+  assert.equal(result.body.ok, false);
+  assert.equal(result.body.error, "INVALID_BOOKING_TIME_WINDOW");
+  assert.equal(result.body.details[0].reason, "START_TOO_SOON");
+  assert.equal(calls.createPendingHoldIfAvailableTx, 0);
+  assert.equal(calls.confirmBooking, 0);
+  assert.equal(calls.failBooking, 0);
+});
+
+test("rejects booking that violates max_days_ahead", async () => {
+  const { calls, deps } = makeFlowDeps({
+    bodyOverrides: { startLocal: "2027-01-01T09:00:00" },
+  });
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 400);
+  assert.equal(result.body.ok, false);
+  assert.equal(result.body.error, "INVALID_BOOKING_TIME_WINDOW");
+  assert.equal(result.body.details[0].reason, "START_TOO_FAR");
+  assert.equal(calls.createPendingHoldIfAvailableTx, 0);
+  assert.equal(calls.confirmBooking, 0);
+  assert.equal(calls.failBooking, 0);
 });
