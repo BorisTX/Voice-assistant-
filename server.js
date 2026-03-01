@@ -708,8 +708,13 @@ async function start() {
 
   // ✅ ONE-TIME migration for legacy plaintext refresh_token -> encrypted fields
   // controlled by RUN_TOKEN_MIGRATION=1
-  const migRes = await maybeMigrateLegacyTokens(db);
-  console.log("Token migration result:", migRes);
+  if (process.env.RUN_TOKEN_MIGRATION === "1") {
+    const migRes = await maybeMigrateLegacyTokens(db);
+    console.log("Legacy token migration executed");
+    console.log("Token migration result:", migRes);
+  } else {
+    console.log("Legacy token migration skipped");
+  }
 
   server.listen(PORT, () => {
     console.log("Voice assistant is running 🚀 on port", PORT);
