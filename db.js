@@ -42,6 +42,18 @@ function all(db, sql, params = []) {
   });
 }
 
+export async function beginImmediateTransaction(db) {
+  await run(db, "BEGIN IMMEDIATE");
+}
+
+export async function commitTransaction(db) {
+  await run(db, "COMMIT");
+}
+
+export async function rollbackTransaction(db) {
+  await run(db, "ROLLBACK");
+}
+
 const BOOKING_TRANSITIONS = {
   pending: new Set(["confirmed", "failed", "cancelled"]),
   confirmed: new Set(["cancelled"]),
@@ -513,6 +525,7 @@ export async function createPendingHold(db, payload) {
     service_address = null,
     service_type = null,
     timezone = "UTC",
+    slot_key,
     job_summary = null,
     is_emergency = 0,
   } = payload;
@@ -520,6 +533,7 @@ export async function createPendingHold(db, payload) {
   if (!id) throw new Error("createPendingHold: missing id");
   if (!business_id) throw new Error("createPendingHold: missing business_id");
   if (!start_utc || !end_utc) throw new Error("createPendingHold: missing start/end");
+  if (!slot_key) throw new Error("createPendingHold: missing slot_key");
 
   await run(
     db,
@@ -532,11 +546,12 @@ export async function createPendingHold(db, payload) {
       customer_name, customer_phone, customer_email,
       service_address, service_type,
       timezone,
+      slot_key,
       job_summary,
       is_emergency,
       gcal_event_id,
       created_at_utc, updated_at_utc
-    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       id,
@@ -552,6 +567,7 @@ export async function createPendingHold(db, payload) {
       service_address,
       service_type,
       timezone,
+      slot_key,
       job_summary,
       is_emergency,
       null,
@@ -561,6 +577,11 @@ export async function createPendingHold(db, payload) {
   );
 
   return true;
+}
+
+
+export async function createPendingBookingLock(db, payload) {
+  return createPendingHold(db, payload);
 }
 
 export async function createPendingHoldIfAvailableTx(db, payload) {
@@ -580,6 +601,7 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
     service_address = null,
     service_type = null,
     timezone = "UTC",
+    slot_key,
     job_summary = null,
     is_emergency = 0,
   } = payload;
@@ -587,6 +609,7 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
   if (!id) throw new Error("createPendingHoldIfAvailableTx: missing id");
   if (!business_id) throw new Error("createPendingHoldIfAvailableTx: missing business_id");
   if (!start_utc || !end_utc) throw new Error("createPendingHoldIfAvailableTx: missing start/end");
+  if (!slot_key) throw new Error("createPendingHoldIfAvailableTx: missing slot_key");
 
   try {
     await run(db, "BEGIN IMMEDIATE");
@@ -639,11 +662,12 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
         customer_name, customer_phone, customer_email,
         service_address, service_type,
         timezone,
+        slot_key,
         job_summary,
         is_emergency,
         gcal_event_id,
         created_at_utc, updated_at_utc
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         id,
@@ -659,6 +683,7 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
         service_address,
         service_type,
         timezone,
+        slot_key,
         job_summary,
         is_emergency,
         null,
