@@ -403,11 +403,11 @@ row.refresh_token_enc = encVal;
 row.refresh_token_iv = ivVal;
 row.refresh_token_tag = tagVal;
     try {
-      row.refresh_token = decryptToken({
-        enc: row.refresh_token_enc,
-        iv: row.refresh_token_iv,
-        tag: row.refresh_token_tag,
-      });
+      row.refresh_token = decryptToken(
+        row.refresh_token_enc,
+        row.refresh_token_iv,
+        row.refresh_token_tag
+      );
     } catch (e) {
       throw new Error("Failed to decrypt refresh_token: " + String(e?.message || e));
     }
