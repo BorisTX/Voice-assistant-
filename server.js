@@ -1003,10 +1003,20 @@ async function shutdown(signal) {
   }, SHUTDOWN_TIMEOUT_MS);
 
   try {
-    console.log("closing ws");
-    const wsClosed = new Promise((resolve) => {
-      wss.close(() => resolve());
-    });
+    if (retryIntervalId) {
+      clearInterval(retryIntervalId);
+      retryIntervalId = undefined;
+    }
+
+    const serverClosed = new Promise((resolve) => server?.close?.(() => resolve()) ?? resolve());
+
+    if (wss && typeof wss.close === "function") {
+      try {
+        await new Promise((res) => wss.close(() => res()));
+      } catch (e) {
+        console.error("wss.close failed", e);
+      }
+    }
 
     for (const client of activeWsClients) {
       try { client.close(); } catch {}
@@ -1018,20 +1028,8 @@ async function shutdown(signal) {
       }
     }, SHUTDOWN_POLL_MS * 2);
 
-    await wsClosed;
-
-    console.log("cleared retry interval");
-    if (retryIntervalId) {
-      clearInterval(retryIntervalId);
-      retryIntervalId = undefined;
-    }
-
-    await new Promise((resolve) => {
-      server.close(() => {
-        console.log("HTTP server closed (no longer accepting new connections)");
-        resolve();
-      });
-    });
+    await serverClosed;
+    console.log("HTTP server closed (no longer accepting new connections)");
 
     setTimeout(() => {
       console.log("destroying sockets");
