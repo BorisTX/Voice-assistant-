@@ -1,6 +1,7 @@
 // db.js (multi-tenant only; uses the db instance from openDb())
 
 // --- tiny promise helpers ---
+import crypto from "crypto";
 import { encryptToken, decryptToken } from "./src/security/tokens.js";
 
 const isProd = process.env.NODE_ENV === "production";
@@ -34,6 +35,23 @@ function all(db, sql, params = []) {
       resolve(rows || []);
     });
   });
+}
+
+const BOOKING_TRANSITIONS = {
+  pending: new Set(["confirmed", "failed", "cancelled"]),
+  confirmed: new Set(["cancelled"]),
+  failed: new Set(),
+  cancelled: new Set(),
+};
+
+function buildInvalidTransitionError(fromStatus, toStatus) {
+  const error = new Error(`Invalid booking status transition: ${fromStatus} -> ${toStatus}`);
+  error.code = "INVALID_STATUS_TRANSITION";
+  return error;
+}
+
+export async function listTables(db) {
+  return all(db, `SELECT name FROM sqlite_master WHERE type='table' ORDER BY name ASC`);
 }
 
 // --- businesses ---
@@ -136,6 +154,12 @@ export async function insertBusiness(db, business) {
   );
 
   return id;
+}
+
+export async function assertBusinessExists(db, businessId) {
+  const row = await get(db, `SELECT id FROM businesses WHERE id = ? LIMIT 1`, [businessId]);
+  if (!row) throw new Error(`Business not found: ${businessId}`);
+  return true;
 }
 
 // --- google tokens (single source of truth) ---
@@ -343,6 +367,9 @@ export async function createPendingHold(db, payload) {
     customer_name = null,
     customer_phone = null,
     customer_email = null,
+    service_address = null,
+    service_type = null,
+    timezone = "UTC",
     job_summary = null,
     is_emergency = 0,
   } = payload;
@@ -360,11 +387,13 @@ export async function createPendingHold(db, payload) {
       overlap_start_utc, overlap_end_utc,
       status, hold_expires_at_utc,
       customer_name, customer_phone, customer_email,
+      service_address, service_type,
+      timezone,
       job_summary,
       is_emergency,
       gcal_event_id,
       created_at_utc, updated_at_utc
-    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       id,
@@ -377,8 +406,12 @@ export async function createPendingHold(db, payload) {
       customer_name,
       customer_phone,
       customer_email,
+      service_address,
+      service_type,
+      timezone,
       job_summary,
       is_emergency,
+      null,
       now,
       now,
     ]
@@ -400,6 +433,9 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
     customer_name = null,
     customer_phone = null,
     customer_email = null,
+    service_address = null,
+    service_type = null,
+    timezone = "UTC",
     job_summary = null,
     is_emergency = 0,
   } = payload;
@@ -455,11 +491,13 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
         overlap_start_utc, overlap_end_utc,
         status, hold_expires_at_utc,
         customer_name, customer_phone, customer_email,
+        service_address, service_type,
+        timezone,
         job_summary,
         is_emergency,
         gcal_event_id,
         created_at_utc, updated_at_utc
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         id,
@@ -472,8 +510,12 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
         customer_name,
         customer_phone,
         customer_email,
+        service_address,
+        service_type,
+        timezone,
         job_summary,
         is_emergency,
+        null,
         now,
         now,
       ]
@@ -488,52 +530,53 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
 }
 
 export async function confirmBooking(db, bookingId, gcalEventId) {
-  const now = new Date().toISOString();
-  await run(
-    db,
-    `
-    UPDATE bookings
-    SET status='confirmed',
-        hold_expires_at_utc=NULL,
-        gcal_event_id=?,
-        updated_at_utc=?
-    WHERE id=?
-    `,
-    [gcalEventId || null, now, bookingId]
-  );
+  await updateBookingStatus(db, bookingId, "confirmed", {
+    hold_expires_at_utc: null,
+    gcal_event_id: gcalEventId || null,
+    failure_reason: null,
+  });
   return true;
 }
 
 export async function failBooking(db, bookingId, reason = null) {
-  const now = new Date().toISOString();
   const summary = reason ? `FAILED: ${reason}` : "FAILED";
-  await run(
-    db,
-    `
-    UPDATE bookings
-    SET status='failed',
-        hold_expires_at_utc=NULL,
-        job_summary=COALESCE(job_summary, ?) ,
-        updated_at_utc=?
-    WHERE id=?
-    `,
-    [summary, now, bookingId]
-  );
+  await updateBookingStatus(db, bookingId, "failed", {
+    hold_expires_at_utc: null,
+    failure_reason: reason || null,
+    job_summary: summary,
+  });
   return true;
 }
 
 export async function cancelBooking(db, bookingId) {
+  await updateBookingStatus(db, bookingId, "cancelled", {});
+  return true;
+}
+
+export async function updateBookingStatus(db, bookingId, newStatus, fields = {}) {
+  const booking = await getBookingById(db, bookingId);
+  if (!booking) {
+    const e = new Error(`Booking not found: ${bookingId}`);
+    e.code = "BOOKING_NOT_FOUND";
+    throw e;
+  }
+
+  const currentStatus = booking.status;
+  const allowed = BOOKING_TRANSITIONS[currentStatus] || new Set();
+  if (!allowed.has(newStatus)) {
+    throw buildInvalidTransitionError(currentStatus, newStatus);
+  }
+
   const now = new Date().toISOString();
-  await run(
-    db,
-    `
-    UPDATE bookings
-    SET status='cancelled',
-        updated_at_utc=?
-    WHERE id=?
-    `,
-    [now, bookingId]
-  );
+  const setParts = ["status = ?", "updated_at_utc = ?"];
+  const params = [newStatus, now];
+  for (const [k, v] of Object.entries(fields)) {
+    setParts.push(`${k} = ?`);
+    params.push(v);
+  }
+  params.push(bookingId);
+
+  await run(db, `UPDATE bookings SET ${setParts.join(", ")} WHERE id = ?`, params);
   return true;
 }
 
@@ -551,10 +594,20 @@ export async function getBookingById(db, bookingId) {
 
 export async function logSmsAttempt(
   db,
-  { businessId, bookingId = null, phone, message = null, status, errorMessage = null }
+  {
+    businessId,
+    bookingId = null,
+    toNumber,
+    fromNumber = process.env.TWILIO_FROM_NUMBER || null,
+    messageBody = null,
+    messageSid = null,
+    type = "other",
+    status,
+    errorMessage = null,
+  }
 ) {
   if (!businessId) throw new Error("logSmsAttempt: missing businessId");
-  if (typeof phone !== "string") throw new Error("logSmsAttempt: missing phone");
+  if (typeof toNumber !== "string") throw new Error("logSmsAttempt: missing toNumber");
   if (!status) throw new Error("logSmsAttempt: missing status");
 
   const now = new Date().toISOString();
@@ -565,14 +618,28 @@ export async function logSmsAttempt(
     INSERT INTO sms_logs (
       business_id,
       booking_id,
-      phone,
-      message,
+      to_number,
+      from_number,
+      message_body,
+      message_sid,
+      type,
       status,
       error_message,
       created_at_utc
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
-    [businessId, bookingId, phone, message, status, errorMessage, now]
+    [
+      businessId,
+      bookingId,
+      toNumber,
+      fromNumber,
+      messageBody,
+      messageSid,
+      type,
+      status,
+      errorMessage,
+      now,
+    ]
   );
 
   return true;
@@ -709,4 +776,136 @@ export async function migrateLegacyRefreshTokens(db) {
 export async function maybeMigrateLegacyTokens(db) {
   if (process.env.RUN_TOKEN_MIGRATION !== "1") return { ok: true, skipped: true };
   return migrateLegacyRefreshTokens(db);
+}
+
+export async function logCallEvent(
+  db,
+  {
+    businessId,
+    callSid = null,
+    fromNumber = "",
+    toNumber = "",
+    direction = "inbound",
+    status,
+    durationSec = null,
+    recordingUrl = null,
+    metaJson = null,
+  }
+) {
+  if (!businessId) throw new Error("logCallEvent: missing businessId");
+  if (!status) throw new Error("logCallEvent: missing status");
+
+  const now = new Date().toISOString();
+  await run(
+    db,
+    `
+    INSERT INTO call_logs (
+      id, business_id, call_sid, from_number, to_number, direction, status,
+      duration_sec, recording_url, meta_json, created_at_utc
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    [
+      crypto.randomUUID(),
+      businessId,
+      callSid,
+      fromNumber,
+      toNumber,
+      direction,
+      status,
+      durationSec,
+      recordingUrl,
+      metaJson,
+      now,
+    ]
+  );
+
+  return true;
+}
+
+export async function enqueueRetry(
+  db,
+  { businessId, bookingId = null, kind, payloadJson, maxAttempts = 5, nextAttemptAtUtc = null }
+) {
+  if (!businessId) throw new Error("enqueueRetry: missing businessId");
+  if (!kind) throw new Error("enqueueRetry: missing kind");
+
+  const now = new Date().toISOString();
+  await run(
+    db,
+    `
+    INSERT INTO retries (
+      id, business_id, booking_id, kind, payload_json,
+      attempt_count, max_attempts, next_attempt_at_utc, last_error,
+      status, created_at_utc, updated_at_utc
+    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, NULL, 'pending', ?, ?)
+    `,
+    [
+      crypto.randomUUID(),
+      businessId,
+      bookingId,
+      kind,
+      typeof payloadJson === "string" ? payloadJson : JSON.stringify(payloadJson || {}),
+      maxAttempts,
+      nextAttemptAtUtc || now,
+      now,
+      now,
+    ]
+  );
+
+  return true;
+}
+
+export async function listDueRetries(db, limit = 20) {
+  const now = new Date().toISOString();
+  return all(
+    db,
+    `
+    SELECT * FROM retries
+    WHERE status='pending' AND next_attempt_at_utc <= ?
+    ORDER BY next_attempt_at_utc ASC, created_at_utc ASC
+    LIMIT ?
+    `,
+    [now, limit]
+  );
+}
+
+export async function markRetryAttempt(db, retryId, { attemptCount, nextAttemptAtUtc, status, lastError }) {
+  const now = new Date().toISOString();
+  await run(
+    db,
+    `
+    UPDATE retries
+    SET attempt_count = ?,
+        next_attempt_at_utc = ?,
+        status = ?,
+        last_error = ?,
+        updated_at_utc = ?
+    WHERE id = ?
+    `,
+    [attemptCount, nextAttemptAtUtc, status, lastError || null, now, retryId]
+  );
+  return true;
+}
+
+export async function listRecentBookings(db, limit = 50) {
+  return all(db, `SELECT * FROM bookings ORDER BY created_at_utc DESC LIMIT ?`, [limit]);
+}
+
+export async function listRecentCallLogs(db, limit = 50) {
+  return all(db, `SELECT * FROM call_logs ORDER BY created_at_utc DESC LIMIT ?`, [limit]);
+}
+
+export async function listRecentSmsLogs(db, limit = 50) {
+  return all(db, `SELECT * FROM sms_logs ORDER BY created_at_utc DESC LIMIT ?`, [limit]);
+}
+
+export async function listRecentRetries(db, { status = null, limit = 50 } = {}) {
+  if (status) {
+    return all(
+      db,
+      `SELECT * FROM retries WHERE status = ? ORDER BY created_at_utc DESC LIMIT ?`,
+      [status, limit]
+    );
+  }
+  return all(db, `SELECT * FROM retries ORDER BY created_at_utc DESC LIMIT ?`, [limit]);
 }

@@ -161,6 +161,9 @@ export async function createBookingFlow({
       customer_phone: input.customer?.phone || null,
       customer_email: input.customer?.email || null,
       customer_address: input.customer?.address || null,
+      service_address: input.customer?.address || null,
+      service_type: input.service || "HVAC",
+      timezone: input.timezone,
       service: input.service,
       notes: input.notes,
       job_summary: isEmergency ? `[EMERGENCY] ${input.service || "HVAC"}` : input.service || "HVAC",
@@ -182,25 +185,41 @@ export async function createBookingFlow({
     }
 
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
-    const created = await withTimeout(
-      calendar.events.insert({
-        calendarId: "primary",
-        requestBody: {
+    let created;
+    try {
+      created = await withTimeout(
+        calendar.events.insert({
+          calendarId: "primary",
+          requestBody: {
+            summary: `${isEmergency ? "🚨 " : ""}${input.service || "HVAC"} - ${input.customer?.name || "Customer"}`,
+            description: buildCalendarDescription({ bookingId, customer: input.customer, notes: input.notes }),
+            start: {
+              dateTime: schedule.startUtcIso,
+              timeZone: input.timezone,
+            },
+            end: {
+              dateTime: schedule.endUtcIso,
+              timeZone: input.timezone,
+            },
+          },
+        }),
+        googleApiTimeoutMs,
+        "google.events.insert"
+      );
+    } catch (gcalError) {
+      const reason = `GCAL_CREATE_FAILED: ${String(gcalError?.message || gcalError)}`;
+      await data.failBooking(bookingId, reason);
+      await data.enqueueRetry({
+        businessId: input.businessId,
+        bookingId,
+        kind: "gcal_create",
+        payloadJson: {
           summary: `${isEmergency ? "🚨 " : ""}${input.service || "HVAC"} - ${input.customer?.name || "Customer"}`,
           description: buildCalendarDescription({ bookingId, customer: input.customer, notes: input.notes }),
-          start: {
-            dateTime: schedule.startUtcIso,
-            timeZone: input.timezone,
-          },
-          end: {
-            dateTime: schedule.endUtcIso,
-            timeZone: input.timezone,
-          },
         },
-      }),
-      googleApiTimeoutMs,
-      "google.events.insert"
-    );
+      });
+      return { status: 502, body: { ok: false, error: "Calendar create failed" } };
+    }
 
     await data.confirmBooking(bookingId, created?.data?.id || null);
     log("info", "confirm", "Booking confirmed", { gcalEventId: created?.data?.id || null, isEmergency });
@@ -225,6 +244,18 @@ export async function createBookingFlow({
 
     Promise.resolve()
       .then(async () => {
+        if (typeof data.logSmsAttempt === "function") {
+          await data.logSmsAttempt({
+            businessId: input.businessId,
+            bookingId,
+            toNumber: input.customer?.phone ? String(input.customer.phone) : "",
+            messageBody: null,
+            type: "confirmation",
+            status: "queued",
+            errorMessage: null,
+          });
+        }
+
         const smsResult = await sendBookingConfirmationFn({ booking: bookingForSms, business });
         const status = smsResult?.ok ? "sent" : "failed";
 
@@ -232,10 +263,23 @@ export async function createBookingFlow({
           await data.logSmsAttempt({
             businessId: input.businessId,
             bookingId,
-            phone: input.customer?.phone ? String(input.customer.phone) : "",
-            message: smsResult?.message || null,
-            status,
+            toNumber: input.customer?.phone ? String(input.customer.phone) : "",
+            messageBody: smsResult?.message || null,
+            type: "confirmation",
+            status: smsResult?.ok ? "sent" : "failed",
             errorMessage: smsResult?.ok ? null : smsResult?.error || "Unknown SMS error",
+          });
+        }
+
+        if (!smsResult?.ok && typeof data.enqueueRetry === "function") {
+          await data.enqueueRetry({
+            businessId: input.businessId,
+            bookingId,
+            kind: "twilio_sms",
+            payloadJson: {
+              to: input.customer?.phone ? String(input.customer.phone) : "",
+              body: smsResult?.message || null,
+            },
           });
         }
 

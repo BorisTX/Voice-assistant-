@@ -12,6 +12,7 @@ import { normalizeBusyUtc, generateSlots } from "./src/slots.js";
 import { openDb, runMigrations } from "./src/db/migrate.js";
 import { makeDataLayer } from "./src/data/index.js";
 import { createBookingFlow } from "./src/bookings/createBooking.js";
+import { runRetriesOnce } from "./src/retries/runRetriesOnce.js";
 
 import {
   makeOAuthClient,
@@ -134,6 +135,52 @@ app.get("/debug/create-default-business", async (req, res) => {
     });
 
     res.json({ ok: true, created: true, businessId });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+
+app.get("/debug/bookings", async (req, res) => {
+  try {
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const rows = await data.listRecentBookings(limit);
+    res.json({ ok: true, count: rows.length, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.get("/debug/call-logs", async (req, res) => {
+  try {
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const rows = await data.listRecentCallLogs(limit);
+    res.json({ ok: true, count: rows.length, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.get("/debug/sms-logs", async (req, res) => {
+  try {
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const rows = await data.listRecentSmsLogs(limit);
+    res.json({ ok: true, count: rows.length, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.get("/debug/retries", async (req, res) => {
+  try {
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const status = req.query.status ? String(req.query.status) : null;
+    const rows = await data.listRecentRetries({ status, limit });
+    res.json({ ok: true, count: rows.length, rows });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -391,8 +438,32 @@ app.get("/voice", (req, res) => {
   res.status(200).send("VOICE OK (GET)");
 });
 
-app.post("/voice", (req, res) => {
+app.post("/voice", async (req, res) => {
   console.log("POST /voice from Twilio");
+
+  try {
+    if (data) {
+      const callStatus = String(req.body?.CallStatus || "started").toLowerCase();
+      let normalizedStatus = "started";
+      if (["completed"].includes(callStatus)) normalizedStatus = "completed";
+      if (["failed", "busy", "no-answer", "canceled"].includes(callStatus)) normalizedStatus = "failed";
+
+      const businessId = String(req.body?.business_id || process.env.DEFAULT_BUSINESS_ID || "");
+      if (businessId) await data.logCallEvent({
+        businessId,
+        callSid: req.body?.CallSid || null,
+        fromNumber: req.body?.From || "",
+        toNumber: req.body?.To || "",
+        direction: req.body?.Direction || "inbound",
+        status: normalizedStatus,
+        durationSec: req.body?.CallDuration ? Number(req.body.CallDuration) : null,
+        recordingUrl: req.body?.RecordingUrl || null,
+        metaJson: JSON.stringify(req.body || {}),
+      });
+    }
+  } catch (e) {
+    console.error("call log error", e);
+  }
 
   const host = req.headers["x-forwarded-host"] || req.headers.host;
 
@@ -546,6 +617,18 @@ async function start() {
     console.log("Token migration result:", migRes);
   } else {
     console.log("Legacy token migration skipped");
+  }
+
+
+  if (process.env.RUN_RETRY_WORKER === "1") {
+    setInterval(() => {
+      runRetriesOnce({ data, limit: 20 }).catch((e) => {
+        console.error("retry worker tick failed", e);
+      });
+    }, 15_000);
+    console.log("Retry worker enabled");
+  } else {
+    console.log("Retry worker disabled");
   }
 
   server.listen(PORT, () => {
