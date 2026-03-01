@@ -1,6 +1,8 @@
 import crypto from "crypto";
 import { DateTime } from "luxon";
 import { sendBookingConfirmation } from "../sms/sendBookingConfirmation.js";
+import { handleEmergency } from "../emergency/handleEmergency.js";
+import { isOutsideBusinessHours } from "../emergency/businessHours.js";
 
 function toSafeErrorCode(error) {
   const message = String(error?.message || "");
@@ -32,6 +34,7 @@ function normalizeInput(body) {
     durationMinsRaw,
     bufferMinsRaw,
     service: body?.service ? String(body.service) : null,
+    emergencyFlag: body?.isEmergency === true || body?.is_emergency === true || body?.emergency === true,
     customer,
     notes: body?.notes ? String(body.notes) : null,
   };
@@ -94,6 +97,7 @@ export async function createBookingFlow({
   googleApiTimeoutMs,
   withTimeout,
   sendBookingConfirmationFn = sendBookingConfirmation,
+  handleEmergencyFn = handleEmergency,
 }) {
   let bookingId = null;
   const input = normalizeInput(body);
@@ -117,6 +121,19 @@ export async function createBookingFlow({
       return { status: 400, body: { ok: false, error: schedule.errors.join("; ") } };
     }
 
+    const isEmergencyService = (input.service || "").toLowerCase() === "emergency";
+    const isAfterHours = isOutsideBusinessHours({
+      startUtc: schedule.startUtcIso,
+      businessProfile: {
+        timezone: business?.timezone,
+        working_hours_start: business?.working_hours_start,
+        working_hours_end: business?.working_hours_end,
+        working_hours_json: business?.working_hours_json,
+      },
+    });
+
+    const isEmergency = isEmergencyService || isAfterHours || input.emergencyFlag;
+
     if (typeof data.cleanupExpiredHolds === "function") {
       await data.cleanupExpiredHolds(input.businessId);
     }
@@ -127,6 +144,9 @@ export async function createBookingFlow({
       endUtc: schedule.endUtcIso,
       holdStartUtc: schedule.holdStartUtcIso,
       holdEndUtc: schedule.holdEndUtcIso,
+      isEmergency,
+      isAfterHours,
+      isEmergencyService,
     });
 
     const hold = await data.createPendingHoldIfAvailableTx({
@@ -143,7 +163,8 @@ export async function createBookingFlow({
       customer_address: input.customer?.address || null,
       service: input.service,
       notes: input.notes,
-      job_summary: input.service || "HVAC",
+      job_summary: isEmergency ? `[EMERGENCY] ${input.service || "HVAC"}` : input.service || "HVAC",
+      is_emergency: isEmergency ? 1 : 0,
     });
 
     if (!hold?.ok) {
@@ -165,7 +186,7 @@ export async function createBookingFlow({
       calendar.events.insert({
         calendarId: "primary",
         requestBody: {
-          summary: `${input.service || "HVAC"} - ${input.customer?.name || "Customer"}`,
+          summary: `${isEmergency ? "🚨 " : ""}${input.service || "HVAC"} - ${input.customer?.name || "Customer"}`,
           description: buildCalendarDescription({ bookingId, customer: input.customer, notes: input.notes }),
           start: {
             dateTime: schedule.startUtcIso,
@@ -182,17 +203,24 @@ export async function createBookingFlow({
     );
 
     await data.confirmBooking(bookingId, created?.data?.id || null);
-    log("info", "confirm", "Booking confirmed", { gcalEventId: created?.data?.id || null });
+    log("info", "confirm", "Booking confirmed", { gcalEventId: created?.data?.id || null, isEmergency });
 
     const bookingForSms = {
       id: bookingId,
+      business_id: input.businessId,
       status: "confirmed",
       startUtc: schedule.startUtcIso,
+      start_utc: schedule.startUtcIso,
       timezone: input.timezone,
+      is_emergency: isEmergency,
       customer: {
         name: input.customer?.name || null,
         phone: input.customer?.phone || null,
+        address: input.customer?.address || null,
       },
+      customer_name: input.customer?.name || null,
+      customer_phone: input.customer?.phone || null,
+      customer_address: input.customer?.address || null,
     };
 
     Promise.resolve()
@@ -217,6 +245,33 @@ export async function createBookingFlow({
         log("error", "sms", "SMS flow failed", { error: String(smsError?.message || smsError) });
       });
 
+    let emergencyEscalated = false;
+
+    if (isEmergency) {
+      Promise.resolve()
+        .then(async () => {
+          const emergencyResult = await handleEmergencyFn({
+            booking: bookingForSms,
+            business,
+            data,
+          });
+
+          log("info", "emergency", "Emergency escalation attempted", {
+            escalated: Boolean(emergencyResult?.escalated),
+            smsOk: Boolean(emergencyResult?.sms?.ok),
+            callAttempted: Boolean(emergencyResult?.call?.attempted),
+            callOk: Boolean(emergencyResult?.call?.ok),
+          });
+        })
+        .catch((emergencyError) => {
+          log("error", "emergency", "Emergency escalation failed", {
+            error: String(emergencyError?.message || emergencyError),
+          });
+        });
+
+      emergencyEscalated = true;
+    }
+
     return {
       status: 200,
       body: {
@@ -226,6 +281,8 @@ export async function createBookingFlow({
         gcalEventId: created?.data?.id || null,
         startUtc: schedule.startUtcIso,
         endUtc: schedule.endUtcIso,
+        isEmergency,
+        emergencyEscalated,
       },
     };
   } catch (error) {

@@ -41,6 +41,7 @@ export async function getBusinessById(db, businessId) {
   return get(
     db,
     `SELECT id, name, industry, timezone, working_hours_json,
+            working_hours_start, working_hours_end, technician_phone,
             default_duration_min, slot_granularity_min,
             buffer_before_min, buffer_after_min,
             lead_time_min, max_days_ahead, max_daily_jobs,
@@ -81,6 +82,9 @@ export async function insertBusiness(db, business) {
     industry = "hvac",
     timezone = "America/Chicago",
     working_hours_json = "{}",
+    working_hours_start = "08:00",
+    working_hours_end = "17:00",
+    technician_phone = null,
     default_duration_min = 60,
     slot_granularity_min = 15,
     buffer_before_min = 0,
@@ -100,12 +104,13 @@ export async function insertBusiness(db, business) {
     `
     INSERT INTO businesses (
       id, name, industry, timezone, working_hours_json,
+      working_hours_start, working_hours_end, technician_phone,
       default_duration_min, slot_granularity_min,
       buffer_before_min, buffer_after_min,
       lead_time_min, max_days_ahead, max_daily_jobs,
       emergency_enabled, emergency_keywords_json,
       created_at_utc, updated_at_utc
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       id,
@@ -113,6 +118,9 @@ export async function insertBusiness(db, business) {
       industry,
       timezone,
       working_hours_json,
+      working_hours_start,
+      working_hours_end,
+      technician_phone,
       default_duration_min,
       slot_granularity_min,
       buffer_before_min,
@@ -278,6 +286,27 @@ export async function cleanupExpiredPendingHolds(db) {
 
   return true;
 }
+
+export async function cleanupExpiredHolds(db, businessId = null) {
+  if (!businessId) return cleanupExpiredPendingHolds(db);
+
+  const now = new Date().toISOString();
+  await run(
+    db,
+    `
+    UPDATE bookings
+    SET status = 'cancelled', updated_at_utc = ?
+    WHERE business_id = ?
+      AND status = 'pending'
+      AND hold_expires_at_utc IS NOT NULL
+      AND hold_expires_at_utc <= ?
+    `,
+    [now, businessId, now]
+  );
+
+  return true;
+}
+
 export async function findOverlappingActiveBookings(db, businessId, startUtcIso, endUtcIso) {
   const now = new Date().toISOString();
   // overlap rule: existing.start < new.end AND existing.end > new.start
@@ -315,6 +344,7 @@ export async function createPendingHold(db, payload) {
     customer_phone = null,
     customer_email = null,
     job_summary = null,
+    is_emergency = 0,
   } = payload;
 
   if (!id) throw new Error("createPendingHold: missing id");
@@ -331,9 +361,10 @@ export async function createPendingHold(db, payload) {
       status, hold_expires_at_utc,
       customer_name, customer_phone, customer_email,
       job_summary,
+      is_emergency,
       gcal_event_id,
       created_at_utc, updated_at_utc
-    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
     `,
     [
       id,
@@ -347,6 +378,7 @@ export async function createPendingHold(db, payload) {
       customer_phone,
       customer_email,
       job_summary,
+      is_emergency,
       now,
       now,
     ]
@@ -369,6 +401,7 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
     customer_phone = null,
     customer_email = null,
     job_summary = null,
+    is_emergency = 0,
   } = payload;
 
   if (!id) throw new Error("createPendingHoldIfAvailableTx: missing id");
@@ -423,9 +456,10 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
         status, hold_expires_at_utc,
         customer_name, customer_phone, customer_email,
         job_summary,
+        is_emergency,
         gcal_event_id,
         created_at_utc, updated_at_utc
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
       `,
       [
         id,
@@ -439,6 +473,7 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
         customer_phone,
         customer_email,
         job_summary,
+        is_emergency,
         now,
         now,
       ]
@@ -538,6 +573,42 @@ export async function logSmsAttempt(
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `,
     [businessId, bookingId, phone, message, status, errorMessage, now]
+  );
+
+  return true;
+}
+
+export async function logEmergencyAttempt(
+  db,
+  {
+    businessId,
+    bookingId = null,
+    technicianPhone = "",
+    escalationType,
+    status,
+    errorMessage = null,
+  }
+) {
+  if (!businessId) throw new Error("logEmergencyAttempt: missing businessId");
+  if (!escalationType) throw new Error("logEmergencyAttempt: missing escalationType");
+  if (!status) throw new Error("logEmergencyAttempt: missing status");
+
+  const now = new Date().toISOString();
+
+  await run(
+    db,
+    `
+    INSERT INTO emergency_logs (
+      business_id,
+      booking_id,
+      technician_phone,
+      escalation_type,
+      status,
+      error_message,
+      created_at_utc
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `,
+    [businessId, bookingId, technicianPhone, escalationType, status, errorMessage, now]
   );
 
   return true;
