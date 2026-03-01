@@ -12,6 +12,7 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
   const calls = {
     createPendingBookingLock: 0,
     getBookingByIdempotencyKey: 0,
+    cleanupExpiredHolds: 0,
     googleInsert: 0,
     lastGoogleInsertRequestBody: null,
     beginImmediateTransaction: 0,
@@ -32,7 +33,10 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
       working_hours_end: "17:00",
       technician_phone: "+15551234567",
     }),
-    cleanupExpiredHolds: async () => true,
+    cleanupExpiredHolds: async () => {
+      calls.cleanupExpiredHolds += 1;
+      return true;
+    },
     getEffectiveBusinessProfile: async () => ({
       timezone: "America/Chicago",
       slot_duration_min: 60,
@@ -257,6 +261,52 @@ test("returns existing confirmed booking on retry without creating new event", a
   assert.equal(second.status, 200);
   assert.equal(second.body.status, "confirmed");
   assert.equal(second.body.bookingId, existingBooking.id);
+  assert.equal(calls.createPendingBookingLock, 1);
+  assert.equal(calls.googleInsert, 1);
+});
+
+
+test("runs cleanupExpiredHolds before idempotency lookup", async () => {
+  const { calls, deps } = makeFlowDeps();
+  const sequence = [];
+
+  deps.data.cleanupExpiredHolds = async () => {
+    calls.cleanupExpiredHolds += 1;
+    sequence.push("cleanup");
+    return true;
+  };
+
+  deps.data.getBookingByIdempotencyKey = async () => {
+    calls.getBookingByIdempotencyKey += 1;
+    sequence.push("lookup");
+    return null;
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 200);
+  assert.equal(calls.cleanupExpiredHolds, 1);
+  assert.equal(calls.getBookingByIdempotencyKey, 1);
+  assert.deepEqual(sequence.slice(0, 2), ["cleanup", "lookup"]);
+});
+
+test("expired pending booking with same idempotency key does not block new booking attempt", async () => {
+  const { calls, deps } = makeFlowDeps();
+  let lookupCount = 0;
+
+  deps.data.getBookingByIdempotencyKey = async () => {
+    calls.getBookingByIdempotencyKey += 1;
+    lookupCount += 1;
+
+    // Simulates query behavior after filtering out expired pending rows.
+    if (lookupCount === 1) return null;
+    return null;
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 200);
+  assert.equal(calls.getBookingByIdempotencyKey, 1);
   assert.equal(calls.createPendingBookingLock, 1);
   assert.equal(calls.googleInsert, 1);
 });
