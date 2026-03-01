@@ -16,7 +16,7 @@ import {
   listTables,
 
   // bookings
-  cleanupExpiredPendingHolds as cleanupExpiredHolds,
+  
   findOverlappingActiveBookings,
   createPendingHold,
   createPendingHoldIfAvailableTx,
