@@ -212,89 +212,122 @@ export async function createBookingFlow({
     }
 
     bookingId = crypto.randomUUID();
+    const slotKey = `${input.businessId}:${schedule.startUtcIso}`;
     log("info", "hold", "Creating pending hold", {
       startUtc: schedule.startUtcIso,
       endUtc: schedule.endUtcIso,
       holdStartUtc: schedule.holdStartUtcIso,
       holdEndUtc: schedule.holdEndUtcIso,
+      slotKey,
       isEmergency,
       isAfterHours,
       isEmergencyService,
     });
 
-    const hold = await data.createPendingHoldIfAvailableTx({
-      id: bookingId,
-      business_id: input.businessId,
-      start_utc: schedule.startUtcIso,
-      end_utc: schedule.endUtcIso,
-      overlap_start_utc: schedule.holdStartUtcIso,
-      overlap_end_utc: schedule.holdEndUtcIso,
-      hold_expires_at_utc: DateTime.utc().plus({ minutes: 5 }).toISO(),
-      customer_name: input.customer?.name || null,
-      customer_phone: input.customer?.phone || null,
-      customer_email: input.customer?.email || null,
-      customer_address: input.customer?.address || null,
-      service_address: input.customer?.address || null,
-      service_type: input.service || "HVAC",
-      timezone: input.timezone,
-      service: input.service,
-      notes: input.notes,
-      job_summary: isEmergency ? `[EMERGENCY] ${input.service || "HVAC"}` : input.service || "HVAC",
-      is_emergency: isEmergency ? 1 : 0,
-    });
-
-    if (!hold?.ok) {
-      return { status: 409, body: { ok: false, error: "Slot not available" } };
-    }
-
-    const oauth2Client = makeOAuthClient();
-
-    try {
-      await loadTokensIntoClientForBusiness(data, oauth2Client, input.businessId);
-    } catch (error) {
-      const reason = toSafeErrorCode(error);
-      await data.failBooking(bookingId, reason);
-      return { status: 403, body: { ok: false, error: "Google Calendar is not connected" } };
-    }
-
-    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+    let txOpen = false;
     let created;
+
     try {
-      created = await withTimeout(
-        calendar.events.insert({
-          calendarId: "primary",
+      await data.beginImmediateTransaction();
+      txOpen = true;
+
+      await data.createPendingBookingLock({
+        id: bookingId,
+        business_id: input.businessId,
+        start_utc: schedule.startUtcIso,
+        end_utc: schedule.endUtcIso,
+        overlap_start_utc: schedule.holdStartUtcIso,
+        overlap_end_utc: schedule.holdEndUtcIso,
+        hold_expires_at_utc: DateTime.utc().plus({ minutes: 5 }).toISO(),
+        customer_name: input.customer?.name || null,
+        customer_phone: input.customer?.phone || null,
+        customer_email: input.customer?.email || null,
+        customer_address: input.customer?.address || null,
+        service_address: input.customer?.address || null,
+        service_type: input.service || "HVAC",
+        timezone: input.timezone,
+        slot_key: slotKey,
+        service: input.service,
+        notes: input.notes,
+        job_summary: isEmergency ? `[EMERGENCY] ${input.service || "HVAC"}` : input.service || "HVAC",
+        is_emergency: isEmergency ? 1 : 0,
+      });
+
+      const oauth2Client = makeOAuthClient();
+
+      try {
+        await loadTokensIntoClientForBusiness(data, oauth2Client, input.businessId);
+      } catch {
+        if (txOpen) {
+          await data.rollbackTransaction();
+          txOpen = false;
+        }
+        return { status: 403, body: { ok: false, error: "Google Calendar is not connected" } };
+      }
+
+      const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+      const freeBusy = await withTimeout(
+        calendar.freebusy.query({
           requestBody: {
-            summary: `${isEmergency ? "🚨 " : ""}${input.service || "HVAC"} - ${input.customer?.name || "Customer"}`,
-            description: buildCalendarDescription({ bookingId, customer: input.customer, notes: input.notes }),
-            start: {
-              dateTime: schedule.startUtcIso,
-              timeZone: input.timezone,
-            },
-            end: {
-              dateTime: schedule.endUtcIso,
-              timeZone: input.timezone,
-            },
+            timeMin: schedule.startUtcIso,
+            timeMax: schedule.endUtcIso,
+            items: [{ id: "primary" }],
           },
         }),
         googleApiTimeoutMs,
-        "google.events.insert"
+        "google.freebusy.query"
       );
-    } catch (gcalError) {
-      const reason = `GCAL_CREATE_FAILED: ${String(gcalError?.message || gcalError)}`;
-      await data.failBooking(bookingId, reason);
-      await data.enqueueRetry({
-        businessId: input.businessId,
-        bookingId,
-        kind: "gcal_create",
-        payloadJson: {
-          summary: `${isEmergency ? "🚨 " : ""}${input.service || "HVAC"} - ${input.customer?.name || "Customer"}`,
-          description: buildCalendarDescription({ bookingId, customer: input.customer, notes: input.notes }),
-        },
-      });
-      return { status: 502, body: { ok: false, error: "Calendar create failed" } };
+
+      const busyRanges = freeBusy?.data?.calendars?.primary?.busy || [];
+      if (busyRanges.length > 0) {
+        await data.rollbackTransaction();
+        txOpen = false;
+        return { status: 409, body: { ok: false, error: "SLOT_ALREADY_BOOKED" } };
+      }
+
+      try {
+        created = await withTimeout(
+          calendar.events.insert({
+            calendarId: "primary",
+            requestBody: {
+              summary: `${isEmergency ? "🚨 " : ""}${input.service || "HVAC"} - ${input.customer?.name || "Customer"}`,
+              description: buildCalendarDescription({ bookingId, customer: input.customer, notes: input.notes }),
+              start: {
+                dateTime: schedule.startUtcIso,
+                timeZone: input.timezone,
+              },
+              end: {
+                dateTime: schedule.endUtcIso,
+                timeZone: input.timezone,
+              },
+            },
+          }),
+          googleApiTimeoutMs,
+          "google.events.insert"
+        );
+      } catch {
+        await data.rollbackTransaction();
+        txOpen = false;
+        return { status: 500, body: { ok: false, error: "Internal error" } };
+      }
+
+      await data.confirmBooking(bookingId, created?.data?.id || null);
+      await data.commitTransaction();
+      txOpen = false;
+    } catch (error) {
+      if (txOpen) {
+        try {
+          await data.rollbackTransaction();
+        } catch {}
+      }
+
+      if (String(error?.code || "") === "SQLITE_CONSTRAINT" || String(error?.message || "").includes("UNIQUE")) {
+        return { status: 409, body: { ok: false, error: "SLOT_ALREADY_BOOKED" } };
+      }
+
+      return { status: 500, body: { ok: false, error: "Internal error" } };
     }
 
-    await data.confirmBooking(bookingId, created?.data?.id || null);
     log("info", "confirm", "Booking confirmed", { gcalEventId: created?.data?.id || null, isEmergency });
 
     const bookingForSms = {

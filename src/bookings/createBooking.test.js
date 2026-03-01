@@ -7,10 +7,13 @@ function flushAsync() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = { escalated: true } }) {
+function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = { escalated: true } } = {}) {
   const nowInChicago = DateTime.fromISO("2026-01-01T09:00:00", { zone: "America/Chicago" });
   const calls = {
-    createPendingHoldIfAvailableTx: 0,
+    createPendingBookingLock: 0,
+    beginImmediateTransaction: 0,
+    commitTransaction: 0,
+    rollbackTransaction: 0,
     confirmBooking: 0,
     failBooking: 0,
     smsLogs: [],
@@ -34,9 +37,21 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
       lead_time_min: 60,
       max_days_ahead: 14,
     }),
-    createPendingHoldIfAvailableTx: async () => {
-      calls.createPendingHoldIfAvailableTx += 1;
-      return { ok: true };
+    beginImmediateTransaction: async () => {
+      calls.beginImmediateTransaction += 1;
+      return true;
+    },
+    createPendingBookingLock: async () => {
+      calls.createPendingBookingLock += 1;
+      return true;
+    },
+    commitTransaction: async () => {
+      calls.commitTransaction += 1;
+      return true;
+    },
+    rollbackTransaction: async () => {
+      calls.rollbackTransaction += 1;
+      return true;
     },
     confirmBooking: async () => {
       calls.confirmBooking += 1;
@@ -54,6 +69,9 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
 
   const google = {
     calendar: () => ({
+      freebusy: {
+        query: async () => ({ data: { calendars: { primary: { busy: [] } } } }),
+      },
       events: {
         insert: async () => ({ data: { id: "gcal-123" } }),
       },
@@ -174,7 +192,7 @@ test("rejects booking that violates lead_time_min", async () => {
   assert.equal(result.body.ok, false);
   assert.equal(result.body.error, "INVALID_BOOKING_TIME_WINDOW");
   assert.equal(result.body.details[0].reason, "START_TOO_SOON");
-  assert.equal(calls.createPendingHoldIfAvailableTx, 0);
+  assert.equal(calls.createPendingBookingLock, 0);
   assert.equal(calls.confirmBooking, 0);
   assert.equal(calls.failBooking, 0);
 });
@@ -190,7 +208,51 @@ test("rejects booking that violates max_days_ahead", async () => {
   assert.equal(result.body.ok, false);
   assert.equal(result.body.error, "INVALID_BOOKING_TIME_WINDOW");
   assert.equal(result.body.details[0].reason, "START_TOO_FAR");
-  assert.equal(calls.createPendingHoldIfAvailableTx, 0);
+  assert.equal(calls.createPendingBookingLock, 0);
   assert.equal(calls.confirmBooking, 0);
   assert.equal(calls.failBooking, 0);
+});
+
+test("returns 409 when slot unique constraint is hit", async () => {
+  const { deps } = makeFlowDeps();
+  deps.data.createPendingBookingLock = async () => {
+    const err = new Error("UNIQUE constraint failed: bookings.slot_key");
+    err.code = "SQLITE_CONSTRAINT";
+    throw err;
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 409);
+  assert.equal(result.body.error, "SLOT_ALREADY_BOOKED");
+});
+
+test("returns 409 and rolls back when freebusy is already busy", async () => {
+  const { calls, deps } = makeFlowDeps();
+  deps.google = {
+    calendar: () => ({
+      freebusy: {
+        query: async () => ({
+          data: {
+            calendars: {
+              primary: {
+                busy: [{ start: "2026-01-03T15:00:00.000Z", end: "2026-01-03T16:00:00.000Z" }],
+              },
+            },
+          },
+        }),
+      },
+      events: {
+        insert: async () => ({ data: { id: "should-not-happen" } }),
+      },
+    }),
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 409);
+  assert.equal(result.body.error, "SLOT_ALREADY_BOOKED");
+  assert.equal(calls.rollbackTransaction, 1);
+  assert.equal(calls.commitTransaction, 0);
+  assert.equal(calls.confirmBooking, 0);
 });
