@@ -1,7 +1,9 @@
+import crypto from "node:crypto";
+
 const warnedMissingApiKey = { value: false };
 
 function getClientIp(req) {
-  return req.ip || req.headers["x-forwarded-for"] || "unknown";
+  return req.ip || "unknown";
 }
 
 function getBearerToken(value) {
@@ -42,7 +44,12 @@ function createWindowLimiter({ windowMs = 60_000, cleanupAfterMs = 5 * 60_000 } 
       if (hitCounter % 200 === 0) cleanup(now);
 
       const current = entries.get(key);
-      return current.count <= limit;
+      const remaining = Math.max(0, limit - current.count);
+      return {
+        allowed: current.count <= limit,
+        remaining,
+        limit,
+      };
     },
   };
 }
@@ -59,6 +66,26 @@ function getBusinessIdForRateLimit(req) {
   return String(value).trim();
 }
 
+function apiKeysEqual(requestApiKey, configuredApiKey) {
+  const requestBuffer = Buffer.from(String(requestApiKey || ""));
+  const configuredBuffer = Buffer.from(String(configuredApiKey || ""));
+  if (requestBuffer.length !== configuredBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(requestBuffer, configuredBuffer);
+}
+
+function getRouteLimit(path) {
+  if (path === "/available-slots") return 60;
+  if (isBookingPath(path)) return 20;
+  return 120;
+}
+
+function setRateLimitHeaders(res, limit, remaining) {
+  res.setHeader("X-RateLimit-Limit", String(limit));
+  res.setHeader("X-RateLimit-Remaining", String(remaining));
+}
+
 export function createApiSecurityMiddleware() {
   const limiter = createWindowLimiter();
 
@@ -66,8 +93,10 @@ export function createApiSecurityMiddleware() {
     const clientIp = getClientIp(req);
     const configuredApiKey = String(process.env.API_KEY || "").trim();
     const requestApiKey = getRequestKey(req, "x-api-key");
+    const routeLimit = getRouteLimit(req.path);
 
     if (!configuredApiKey) {
+      setRateLimitHeaders(res, routeLimit, routeLimit);
       if (process.env.NODE_ENV === "production") {
         return res.status(500).json({ ok: false, error: "API_KEY not configured" });
       }
@@ -78,28 +107,48 @@ export function createApiSecurityMiddleware() {
       return next();
     }
 
-    if (!requestApiKey || requestApiKey !== configuredApiKey) {
-      const bruteForceAllowed = limiter.hit(`auth-fail:${clientIp}`, 30);
-      if (!bruteForceAllowed) {
+    if (!requestApiKey || !apiKeysEqual(requestApiKey, configuredApiKey)) {
+      const bruteForceResult = limiter.hit(`auth-fail:${clientIp}`, 30);
+      setRateLimitHeaders(res, bruteForceResult.limit, bruteForceResult.remaining);
+      if (!bruteForceResult.allowed) {
         console.warn("auth_bruteforce_rate_limited", { ip: clientIp });
       }
       return res.status(401).json({ ok: false, error: "UNAUTHORIZED" });
     }
 
+    let finalResult;
     let allowed = true;
+    const businessId = getBusinessIdForRateLimit(req);
+
     if (req.path === "/available-slots") {
-      allowed = limiter.hit(`api-slots:${clientIp}`, 60);
+      finalResult = limiter.hit(`api-slots:${clientIp}`, 60);
+      allowed = finalResult.allowed;
     } else if (isBookingPath(req.path)) {
-      allowed = limiter.hit(`api-booking-ip:${clientIp}`, 20);
-      const businessId = getBusinessIdForRateLimit(req);
+      const ipResult = limiter.hit(`api-booking-ip:${clientIp}`, 20);
+      finalResult = ipResult;
+      allowed = ipResult.allowed;
       if (allowed && businessId) {
-        allowed = limiter.hit(`api-booking-business:${clientIp}:${businessId}`, 10);
+        const businessResult = limiter.hit(`api-booking-business:${clientIp}:${businessId}`, 10);
+        finalResult = {
+          allowed: businessResult.allowed,
+          remaining: Math.min(ipResult.remaining, businessResult.remaining),
+          limit: Math.min(ipResult.limit, businessResult.limit),
+        };
+        allowed = businessResult.allowed;
       }
     } else {
-      allowed = limiter.hit(`api-general:${clientIp}`, 120);
+      finalResult = limiter.hit(`api-general:${clientIp}`, 120);
+      allowed = finalResult.allowed;
     }
 
+    setRateLimitHeaders(res, finalResult.limit, finalResult.remaining);
+
     if (!allowed) {
+      console.warn("rate_limited", {
+        ip: clientIp,
+        businessId,
+        path: req.path,
+      });
       return res.status(429).json({ ok: false, error: "RATE_LIMITED" });
     }
 
