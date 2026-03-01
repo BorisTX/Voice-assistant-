@@ -670,6 +670,7 @@ app.put("/api/businesses/:businessId/profile", async (req, res) => {
 // Slots API
 // --------------------
 app.get("/api/available-slots", async (req, res) => {
+  const requestId = req.requestId;
   try {
     if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
@@ -764,8 +765,14 @@ app.get("/api/available-slots", async (req, res) => {
       slots,
     });
   } catch (e) {
-    console.error("available-slots error:", e);
-    return res.status(500).json({ ok: false, error: "Internal error" });
+    console.error(JSON.stringify({
+      level: "error",
+      route: "/api/available-slots",
+      requestId,
+      status_code: 500,
+      error: String(e?.message || e),
+    }));
+    return res.status(500).json({ ok: false, error: "Internal error", requestId });
   }
 });
 
