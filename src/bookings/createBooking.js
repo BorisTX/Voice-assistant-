@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { DateTime } from "luxon";
+import { sendBookingConfirmation } from "../sms/sendBookingConfirmation.js";
 
 function toSafeErrorCode(error) {
   const message = String(error?.message || "");
@@ -92,6 +93,7 @@ export async function createBookingFlow({
   google,
   googleApiTimeoutMs,
   withTimeout,
+  sendBookingConfirmationFn = sendBookingConfirmation,
 }) {
   let bookingId = null;
   const input = normalizeInput(body);
@@ -181,6 +183,39 @@ export async function createBookingFlow({
 
     await data.confirmBooking(bookingId, created?.data?.id || null);
     log("info", "confirm", "Booking confirmed", { gcalEventId: created?.data?.id || null });
+
+    const bookingForSms = {
+      id: bookingId,
+      status: "confirmed",
+      startUtc: schedule.startUtcIso,
+      timezone: input.timezone,
+      customer: {
+        name: input.customer?.name || null,
+        phone: input.customer?.phone || null,
+      },
+    };
+
+    Promise.resolve()
+      .then(async () => {
+        const smsResult = await sendBookingConfirmationFn({ booking: bookingForSms, business });
+        const status = smsResult?.ok ? "sent" : "failed";
+
+        if (typeof data.logSmsAttempt === "function") {
+          await data.logSmsAttempt({
+            businessId: input.businessId,
+            bookingId,
+            phone: input.customer?.phone ? String(input.customer.phone) : "",
+            message: smsResult?.message || null,
+            status,
+            errorMessage: smsResult?.ok ? null : smsResult?.error || "Unknown SMS error",
+          });
+        }
+
+        log("info", "sms", "SMS confirmation attempted", { status });
+      })
+      .catch((smsError) => {
+        log("error", "sms", "SMS flow failed", { error: String(smsError?.message || smsError) });
+      });
 
     return {
       status: 200,

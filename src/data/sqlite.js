@@ -23,6 +23,7 @@ import {
   confirmBooking,
   failBooking,
   cancelBooking,
+  logSmsAttempt,
 } from "../../db.js";
 
 // адаптер: превращаем функции вида (db, ...) в методы data-layer вида (...) с замкнутым db
@@ -55,5 +56,6 @@ export function makeSqliteData(db) {
     confirmBooking: (bookingId, gcalEventId) => confirmBooking(db, bookingId, gcalEventId),
     failBooking: (bookingId, reason) => failBooking(db, bookingId, reason),
     cancelBooking: (bookingId) => cancelBooking(db, bookingId),
+    logSmsAttempt: (payload) => logSmsAttempt(db, payload),
   };
 }
