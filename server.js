@@ -67,7 +67,6 @@ app.use((req, res, next) => {
       if (body && typeof body === "object" && !Array.isArray(body)) {
         return originalJson({ ...body, requestId });
       }
-      return originalJson({ ok: false, error: body, requestId });
     }
     return originalJson(body);
   };
@@ -109,7 +108,7 @@ app.get("/healthz", (req, res) => {
 app.get("/readyz", (req, res) => {
   const ready = isReady && !isShuttingDown && server && server.listening;
   if (!ready) {
-    return res.status(503).json({ ok: false });
+    return res.status(503).json({ ok: false, error: "NOT_READY" });
   }
   return res.status(200).json({ ok: true });
 });
@@ -347,7 +346,7 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.use("/debug", (req, res, next) => {
   if (process.env.DEBUG_ROUTES !== "1") {
-    return res.status(404).send("Not Found");
+    return res.status(404).json({ ok: false, error: "Not Found" });
   }
 
   if (process.env.NODE_ENV === "production") {
@@ -359,7 +358,7 @@ app.use("/debug", (req, res, next) => {
     const requestDebugKey = directDebugKey || bearerDebugKey;
 
     if (!configuredDebugKey || requestDebugKey !== configuredDebugKey) {
-      return res.status(404).send("Not Found");
+      return res.status(404).json({ ok: false, error: "Not Found" });
     }
   }
 
@@ -495,11 +494,12 @@ app.get("/debug/retries", async (req, res) => {
 // OAuth (Business-only)
 // --------------------
 app.get("/auth/google-business", async (req, res) => {
+  const requestId = req.requestId;
   try {
-    if (!data) return res.status(500).send("Data layer not ready");
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
     const businessId = String(req.query.business_id || "");
-    if (!businessId) return res.status(400).send("Missing business_id");
+    if (!businessId) return res.status(400).json({ ok: false, error: "Missing business_id" });
 
     const oauth2Client = makeOAuthClient();
 
@@ -511,37 +511,44 @@ app.get("/auth/google-business", async (req, res) => {
 
     return res.redirect(url);
   } catch (e) {
-    console.error("ERROR in /auth/google-business:", e);
-    return res.status(500).send("OAuth error: " + String(e?.message || e));
+    console.error(JSON.stringify({
+      level: "error",
+      route: "/auth/google-business",
+      requestId,
+      status_code: 500,
+      error: String(e?.message || e),
+    }));
+    return res.status(500).json({ ok: false, error: "OAuth error: " + String(e?.message || e) });
   }
 });
 
 app.get("/auth/google/callback", async (req, res) => {
+  const requestId = req.requestId;
   try {
-    if (!data) return res.status(500).send("Data layer not ready");
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
 
     const code = String(req.query.code || "");
     const state = String(req.query.state || "");
 
-    if (!code) return res.status(400).send("Missing code");
-    if (!state) return res.status(400).send("Missing state");
+    if (!code) return res.status(400).json({ ok: false, error: "Missing code" });
+    if (!state) return res.status(400).json({ ok: false, error: "Missing state" });
 
     const verified = verifyOAuthState(state);
     if (!verified.ok) {
-      return res.status(400).send("Invalid state: " + verified.error);
+      return res.status(400).json({ ok: false, error: "Invalid state: " + verified.error });
     }
 
     const businessId = String(verified.payload.businessId || "");
-    if (!businessId) return res.status(400).send("Invalid state: missing businessId");
+    if (!businessId) return res.status(400).json({ ok: false, error: "Invalid state: missing businessId" });
 
     const nonce = String(verified.payload.nonce || "");
-    if (!nonce) return res.status(400).send("Invalid state: missing nonce");
+    if (!nonce) return res.status(400).json({ ok: false, error: "Invalid state: missing nonce" });
 
     const flow = await data.consumeOAuthFlow(nonce);
-    if (!flow) return res.status(400).send("OAuth flow expired or already used");
+    if (!flow) return res.status(400).json({ ok: false, error: "OAuth flow expired or already used" });
 
     if (flow.business_id !== businessId) {
-      return res.status(400).send("OAuth flow business mismatch");
+      return res.status(400).json({ ok: false, error: "OAuth flow business mismatch" });
     }
 
     const oauth2Client = makeOAuthClient();
@@ -556,8 +563,14 @@ app.get("/auth/google/callback", async (req, res) => {
 
     return res.send("Business Google Calendar connected ✅");
   } catch (e) {
-    console.error("OAuth callback error:", e);
-    return res.status(500).send("OAuth failed: " + String(e?.message || e));
+    console.error(JSON.stringify({
+      level: "error",
+      route: "/auth/google/callback",
+      requestId,
+      status_code: 500,
+      error: String(e?.message || e),
+    }));
+    return res.status(500).json({ ok: false, error: "OAuth failed: " + String(e?.message || e) });
   }
 });
 
@@ -618,7 +631,13 @@ app.get("/debug/calendar-business", async (req, res) => {
       })),
     });
   } catch (e) {
-    console.error("DEBUG calendar-business error:", e);
+    console.error(JSON.stringify({
+      level: "error",
+      route: "/debug/calendar-business",
+      requestId: req.requestId,
+      status_code: 500,
+      error: String(e?.message || e),
+    }));
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
@@ -881,7 +900,14 @@ app.post("/voice", async (req, res) => {
       });
     }
   } catch (e) {
-    console.error("call log error", e);
+    console.error(JSON.stringify({
+      level: "error",
+      route: "/voice",
+      requestId: req.requestId,
+      status_code: 500,
+      error: String(e?.message || e),
+      msg: "call log error",
+    }));
   }
 
   const host = req.headers["x-forwarded-host"] || req.headers.host;
@@ -900,7 +926,7 @@ app.post("/voice", async (req, res) => {
 
 app.use((req, res) => {
   console.log("404:", req.method, req.url);
-  res.status(404).send("Not Found");
+  res.status(404).json({ ok: false, error: "Not Found" });
 });
 
 // --------------------
