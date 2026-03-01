@@ -527,6 +527,8 @@ test("adds idempotency key to Google event description and extendedProperties", 
 
 test("when events.insert times out once but events.list finds event, confirms without duplicate insert", async () => {
   const { calls, deps } = makeFlowDeps();
+  const bookingStartUtc = DateTime.fromISO(deps.body.startLocal, { zone: deps.body.timezone }).toUTC();
+  const bookingEndUtc = bookingStartUtc.plus({ minutes: deps.body.durationMins });
 
   deps.google = {
     calendar: () => ({
@@ -549,7 +551,20 @@ test("when events.insert times out once but events.list finds event, confirms wi
         },
         list: async () => {
           calls.googleEventsList += 1;
-          return { data: { items: [{ id: "gcal-existing" }] } };
+          return {
+            data: {
+              items: [{
+                id: "gcal-existing",
+                start: { dateTime: bookingStartUtc.toISO() },
+                end: { dateTime: bookingEndUtc.toISO() },
+                extendedProperties: {
+                  private: {
+                    idempotencyKey: calls.lastGoogleInsertRequestBody.extendedProperties.private.idempotencyKey,
+                  },
+                },
+              }],
+            },
+          };
         },
       },
     }),
@@ -562,6 +577,112 @@ test("when events.insert times out once but events.list finds event, confirms wi
   assert.equal(calls.googleEventsList, 1);
   assert.equal(calls.confirmBooking, 1);
   assert.equal(result.body.gcalEventId, "gcal-existing");
+});
+
+test("when events.list finds wrong event schedule, booking is not confirmed from lookup and warning is logged", async () => {
+  const { calls, deps } = makeFlowDeps();
+  const warnings = [];
+  const originalWarn = console.warn;
+
+  deps.google = {
+    calendar: () => ({
+      freebusy: {
+        query: async () => ({ data: { calendars: { primary: { busy: [] } } } }),
+      },
+      events: {
+        insert: async () => {
+          calls.googleInsert += 1;
+          const err = new Error("timed out");
+          err.response = { status: 500 };
+          throw err;
+        },
+        list: async () => {
+          calls.googleEventsList += 1;
+          return {
+            data: {
+              items: [{
+                id: "gcal-wrong",
+                start: { dateTime: "2026-01-04T15:00:00.000Z" },
+                end: { dateTime: "2026-01-04T16:00:00.000Z" },
+                extendedProperties: { private: { idempotencyKey: "wrong-key" } },
+              }],
+            },
+          };
+        },
+      },
+    }),
+  };
+
+  console.warn = (message) => {
+    warnings.push(String(message));
+  };
+
+  try {
+    const result = await createBookingFlow(deps);
+    assert.equal(result.status, 500);
+    assert.equal(calls.googleInsert, 2);
+    assert.equal(calls.confirmBooking, 0);
+    assert.ok(warnings.some((line) => line.includes('"type":"idempotency-mismatch"')));
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("idempotency lookup uses dynamic padded time window for long bookings", async () => {
+  const { calls, deps } = makeFlowDeps({
+    bodyOverrides: { durationMins: 360 },
+  });
+  const listCalls = [];
+  const startUtc = DateTime.fromISO(deps.body.startLocal, { zone: deps.body.timezone }).toUTC();
+  const endUtc = startUtc.plus({ minutes: deps.body.durationMins });
+  const expectedPadMinutes = Math.max(60, Math.min(24 * 60, Math.ceil(endUtc.diff(startUtc, "minutes").minutes) + 60));
+
+  deps.google = {
+    calendar: () => ({
+      freebusy: {
+        query: async () => ({ data: { calendars: { primary: { busy: [] } } } }),
+      },
+      events: {
+        insert: async ({ requestBody }) => {
+          calls.googleInsert += 1;
+          calls.lastGoogleInsertRequestBody = requestBody;
+          if (calls.googleInsert === 1) {
+            const err = new Error("timed out");
+            err.response = { status: 500 };
+            throw err;
+          }
+          return { data: { id: "gcal-second-attempt" } };
+        },
+        list: async (params) => {
+          calls.googleEventsList += 1;
+          listCalls.push(params);
+          return {
+            data: {
+              items: [{
+                id: "gcal-existing",
+                start: { dateTime: startUtc.toISO() },
+                end: { dateTime: endUtc.toISO() },
+                extendedProperties: {
+                  private: {
+                    idempotencyKey: calls.lastGoogleInsertRequestBody.extendedProperties.private.idempotencyKey,
+                  },
+                },
+              }],
+            },
+          };
+        },
+      },
+    }),
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 200);
+  assert.equal(calls.googleInsert, 1);
+  assert.equal(calls.googleEventsList, 1);
+  assert.equal(listCalls.length, 1);
+  assert.equal(listCalls[0].timeMin, startUtc.minus({ minutes: expectedPadMinutes }).toISO());
+  assert.equal(listCalls[0].timeMax, endUtc.plus({ minutes: expectedPadMinutes }).toISO());
 });
 
 test("when events.insert transiently fails and list finds nothing, insert retries once", async () => {
