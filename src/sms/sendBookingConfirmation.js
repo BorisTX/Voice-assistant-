@@ -37,6 +37,38 @@ export function createTwilioClient(config = getTwilioConfig()) {
 
       return response.json();
     },
+
+    async makeCall({ to, twiml }) {
+      const { accountSid, authToken, fromPhone } = config;
+
+      if (!accountSid || !authToken || !fromPhone) {
+        throw new Error("Twilio is not configured");
+      }
+
+      const endpoint = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls.json`;
+      const basicAuth = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
+      const payload = new URLSearchParams({
+        To: to,
+        From: fromPhone,
+        Twiml: twiml || "<Response><Say>Emergency HVAC booking assigned. Please check your dispatch channel immediately.</Say></Response>",
+      });
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: payload,
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Twilio call failed (${response.status}): ${errText}`);
+      }
+
+      return response.json();
+    },
   };
 }
 
