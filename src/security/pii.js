@@ -14,7 +14,8 @@ function maskPhone(value) {
   const digits = input.replace(/\D/g, "");
   if (!digits) return "";
   const visible = digits.slice(-2);
-  return `***${visible}`;
+  const hidden = "*".repeat(Math.max(0, digits.length - 2));
+  return `${hidden}${visible}`;
 }
 
 function maskEmail(value) {
