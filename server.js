@@ -6,6 +6,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import crypto from "crypto";
 import { google } from "googleapis";
 import { DateTime } from "luxon";
+import { performance } from "node:perf_hooks";
 
 import { verifyOAuthState } from "./src/security/state.js";
 import { normalizeBusyUtc, generateSlots } from "./src/slots.js";
@@ -38,12 +39,17 @@ app.use((req, res, next) => {
 
 const GOOGLE_API_TIMEOUT_MS_DEFAULT = 10000;
 
+function nowMs() {
+  return performance.now();
+}
+
 const GOOGLE_API_TIMEOUT_MS = (() => {
   const value = Number(process.env.GOOGLE_API_TIMEOUT_MS);
   return Number.isFinite(value) && value > 0 ? value : GOOGLE_API_TIMEOUT_MS_DEFAULT;
 })();
 
 function withTimeout(promise, ms, label) {
+  const t0 = nowMs();
   let timer;
   return Promise.race([
     promise,
@@ -54,7 +60,18 @@ function withTimeout(promise, ms, label) {
         reject(err);
       }, ms);
     }),
-  ]).finally(() => {
+  ])
+    .then((result) => {
+      const duration_ms = Math.round(nowMs() - t0);
+      console.log(JSON.stringify({ op: label, ok: true, duration_ms }));
+      return result;
+    })
+    .catch((error) => {
+      const duration_ms = Math.round(nowMs() - t0);
+      console.error(JSON.stringify({ op: label, ok: false, duration_ms, error: String(error?.message || error) }));
+      throw error;
+    })
+    .finally(() => {
     if (timer) clearTimeout(timer);
   });
 }
@@ -590,14 +607,18 @@ app.get("/api/available-slots", async (req, res) => {
     await loadTokensIntoClientForBusiness(data, oauth2Client, businessId);
 
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
-    const fb = await calendar.freebusy.query({
-      requestBody: {
-        timeMin: timeMinUtc,
-        timeMax: timeMaxUtc,
-        timeZone: "UTC",
-        items: [{ id: "primary" }],
-      },
-    });
+    const fb = await withTimeout(
+      calendar.freebusy.query({
+        requestBody: {
+          timeMin: timeMinUtc,
+          timeMax: timeMaxUtc,
+          timeZone: "UTC",
+          items: [{ id: "primary" }],
+        },
+      }),
+      GOOGLE_API_TIMEOUT_MS,
+      "google.freebusy.query"
+    );
 
     const busy = fb?.data?.calendars?.primary?.busy || [];
     const profileBuffer = Number(profile.buffer_min);
@@ -658,17 +679,39 @@ app.post("/api/bookings", async (req, res) => {
 });
 
 app.post("/api/book", async (req, res) => {
-  const result = await createBookingFlow({
-    data,
-    body: req.body || {},
-    makeOAuthClient,
-    loadTokensIntoClientForBusiness,
-    google,
-    googleApiTimeoutMs: GOOGLE_API_TIMEOUT_MS,
-    withTimeout,
-  });
+  const t0 = nowMs();
+  const route = "/api/book";
+  const businessId = req.body?.businessId ?? req.body?.business_id ?? null;
 
-  return res.status(result.status).json(result.body);
+  try {
+    const result = await createBookingFlow({
+      data,
+      body: req.body || {},
+      makeOAuthClient,
+      loadTokensIntoClientForBusiness,
+      google,
+      googleApiTimeoutMs: GOOGLE_API_TIMEOUT_MS,
+      withTimeout,
+    });
+
+    const duration_ms = Math.round(nowMs() - t0);
+    const status_code = result.status;
+    const bookingId = result.body?.bookingId || null;
+    console.log(JSON.stringify({ level: "info", route, status_code, duration_ms, businessId, bookingId }));
+    return res.status(result.status).json(result.body);
+  } catch (error) {
+    const duration_ms = Math.round(nowMs() - t0);
+    console.error(JSON.stringify({
+      level: "error",
+      route,
+      status_code: 500,
+      duration_ms,
+      businessId,
+      bookingId: null,
+      error: String(error?.message || error),
+    }));
+    return res.status(500).json({ ok: false, error: "Internal error" });
+  }
 });
 
 // --------------------

@@ -1,6 +1,7 @@
 // googleAuth.js
 import { google } from "googleapis";
 import crypto from "crypto";
+import { performance } from "node:perf_hooks";
 import { signOAuthState } from "./src/security/state.js";
 
 // --- PKCE helpers ---
@@ -15,6 +16,10 @@ function base64url(buf) {
 function sha256Base64url(str) {
   const hash = crypto.createHash("sha256").update(str).digest();
   return base64url(hash);
+}
+
+function nowMs() {
+  return performance.now();
 }
 
 function makeCodeVerifier() {
@@ -88,11 +93,21 @@ export async function exchangeCodeAndStoreForBusiness(
   if (!codeVerifier) throw new Error("Missing PKCE codeVerifier");
 
   // googleapis supports passing object; we pass both keys for compatibility
-  const { tokens } = await oauth2Client.getToken({
-    code,
-    codeVerifier, // some versions
-    code_verifier: codeVerifier, // spec / other versions
-  });
+  const t0 = nowMs();
+  let tokens;
+  try {
+    ({ tokens } = await oauth2Client.getToken({
+      code,
+      codeVerifier, // some versions
+      code_verifier: codeVerifier, // spec / other versions
+    }));
+    const duration_ms = Math.round(nowMs() - t0);
+    console.log(JSON.stringify({ op: "google.oauth.get_token", ok: true, duration_ms }));
+  } catch (error) {
+    const duration_ms = Math.round(nowMs() - t0);
+    console.error(JSON.stringify({ op: "google.oauth.get_token", ok: false, duration_ms, error: String(error?.message || error) }));
+    throw error;
+  }
 
   await data.upsertGoogleTokens(businessId, tokens);
   return true;

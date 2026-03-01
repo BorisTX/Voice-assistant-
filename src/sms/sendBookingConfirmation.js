@@ -1,4 +1,9 @@
 import { DateTime } from "luxon";
+import { performance } from "node:perf_hooks";
+
+function nowMs() {
+  return performance.now();
+}
 
 function getTwilioConfig() {
   return {
@@ -97,10 +102,15 @@ export async function sendBookingConfirmation({ booking, business, twilioClient 
     return { ok: false, error: "Customer phone is missing", message };
   }
 
+  const t0 = nowMs();
   try {
     await twilioClient.sendSms({ to: phone, body: message });
+    const duration_ms = Math.round(nowMs() - t0);
+    console.log(JSON.stringify({ op: "twilio.sms", ok: true, duration_ms }));
     return { ok: true, message };
   } catch (error) {
+    const duration_ms = Math.round(nowMs() - t0);
+    console.error(JSON.stringify({ op: "twilio.sms", ok: false, duration_ms, error: String(error?.message || error) }));
     return {
       ok: false,
       error: String(error?.message || error),

@@ -2,7 +2,12 @@
 
 // --- tiny promise helpers ---
 import crypto from "crypto";
+import { performance } from "node:perf_hooks";
 import { encryptToken, decryptToken } from "./src/security/tokens.js";
+
+function nowMs() {
+  return performance.now();
+}
 
 const isProd = process.env.NODE_ENV === "production";
 if (!process.env.TOKENS_ENC_KEY || process.env.TOKENS_ENC_KEY.length !== 64) {
@@ -559,6 +564,7 @@ export async function createPendingHold(db, payload) {
 }
 
 export async function createPendingHoldIfAvailableTx(db, payload) {
+  const t0 = nowMs();
   const now = new Date().toISOString();
   const {
     id,
@@ -617,6 +623,8 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
 
     if (overlap) {
       await run(db, "ROLLBACK");
+      const duration_ms = Math.round(nowMs() - t0);
+      console.log(JSON.stringify({ op: "db.tx.create_hold", ok: true, duration_ms }));
       return { ok: false };
     }
 
@@ -660,30 +668,52 @@ export async function createPendingHoldIfAvailableTx(db, payload) {
     );
 
     await run(db, "COMMIT");
+    const duration_ms = Math.round(nowMs() - t0);
+    console.log(JSON.stringify({ op: "db.tx.create_hold", ok: true, duration_ms }));
     return { ok: true };
   } catch (e) {
     try { await run(db, "ROLLBACK"); } catch {}
+    const duration_ms = Math.round(nowMs() - t0);
+    console.error(JSON.stringify({ op: "db.tx.create_hold", ok: false, duration_ms, error: String(e?.message || e) }));
     throw e;
   }
 }
 
 export async function confirmBooking(db, bookingId, gcalEventId) {
-  await updateBookingStatus(db, bookingId, "confirmed", {
-    hold_expires_at_utc: null,
-    gcal_event_id: gcalEventId || null,
-    failure_reason: null,
-  });
-  return true;
+  const t0 = nowMs();
+  try {
+    await updateBookingStatus(db, bookingId, "confirmed", {
+      hold_expires_at_utc: null,
+      gcal_event_id: gcalEventId || null,
+      failure_reason: null,
+    });
+    const duration_ms = Math.round(nowMs() - t0);
+    console.log(JSON.stringify({ op: "db.tx.confirm_booking", ok: true, duration_ms }));
+    return true;
+  } catch (e) {
+    const duration_ms = Math.round(nowMs() - t0);
+    console.error(JSON.stringify({ op: "db.tx.confirm_booking", ok: false, duration_ms, error: String(e?.message || e) }));
+    throw e;
+  }
 }
 
 export async function failBooking(db, bookingId, reason = null) {
+  const t0 = nowMs();
   const summary = reason ? `FAILED: ${reason}` : "FAILED";
-  await updateBookingStatus(db, bookingId, "failed", {
-    hold_expires_at_utc: null,
-    failure_reason: reason || null,
-    job_summary: summary,
-  });
-  return true;
+  try {
+    await updateBookingStatus(db, bookingId, "failed", {
+      hold_expires_at_utc: null,
+      failure_reason: reason || null,
+      job_summary: summary,
+    });
+    const duration_ms = Math.round(nowMs() - t0);
+    console.log(JSON.stringify({ op: "db.tx.fail_booking", ok: true, duration_ms }));
+    return true;
+  } catch (e) {
+    const duration_ms = Math.round(nowMs() - t0);
+    console.error(JSON.stringify({ op: "db.tx.fail_booking", ok: false, duration_ms, error: String(e?.message || e) }));
+    throw e;
+  }
 }
 
 export async function cancelBooking(db, bookingId) {
