@@ -59,6 +59,186 @@ function withTimeout(promise, ms, label) {
   });
 }
 
+const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+function parseJsonInput(value) {
+  if (typeof value === "string") {
+    return JSON.parse(value);
+  }
+  return value;
+}
+
+function normalizeBusinessProfileForResponse(profile) {
+  return {
+    business_id: profile.business_id,
+    timezone: profile.timezone,
+    working_hours: profile.working_hours,
+    slot_duration_min: Number(profile.slot_duration_min),
+    buffer_min: Number(profile.buffer_min),
+    emergency_enabled: Number(profile.emergency_enabled) ? 1 : 0,
+    emergency_phone: profile.emergency_phone ?? null,
+    service_area: profile.service_area,
+    created_at_utc: profile.created_at_utc || null,
+    updated_at_utc: profile.updated_at_utc || null,
+  };
+}
+
+function validateWorkingHours(raw, details) {
+  let parsed;
+  try {
+    parsed = parseJsonInput(raw);
+  } catch {
+    details.push("working_hours_json must be valid JSON");
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    details.push("working_hours_json must be an object");
+    return null;
+  }
+
+  const keys = Object.keys(parsed);
+  for (const key of keys) {
+    if (!DAYS.includes(key)) {
+      details.push(`working_hours_json has invalid day key: ${key}`);
+    }
+  }
+
+  for (const day of DAYS) {
+    const windows = parsed[day];
+    if (windows == null) continue;
+    if (!Array.isArray(windows)) {
+      details.push(`working_hours_json.${day} must be an array`);
+      continue;
+    }
+
+    windows.forEach((w, i) => {
+      if (!w || typeof w !== "object" || Array.isArray(w)) {
+        details.push(`working_hours_json.${day}[${i}] must be an object`);
+        return;
+      }
+      const start = String(w.start || "");
+      const end = String(w.end || "");
+      if (!HHMM_RE.test(start) || !HHMM_RE.test(end)) {
+        details.push(`working_hours_json.${day}[${i}] start/end must be HH:MM 24h`);
+        return;
+      }
+      if (start >= end) {
+        details.push(`working_hours_json.${day}[${i}] requires start < end`);
+      }
+    });
+  }
+
+  return parsed;
+}
+
+function validateServiceArea(raw, details) {
+  let parsed;
+  try {
+    parsed = parseJsonInput(raw);
+  } catch {
+    details.push("service_area_json must be valid JSON");
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    details.push("service_area_json must be an object");
+    return null;
+  }
+
+  if (parsed.mode === "radius") {
+    const lat = Number(parsed?.center?.lat);
+    const lng = Number(parsed?.center?.lng);
+    const miles = Number(parsed?.miles);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(miles) || miles <= 0) {
+      details.push("service_area_json radius requires center.lat, center.lng, miles > 0");
+      return null;
+    }
+    return parsed;
+  }
+
+  if (parsed.mode === "zip") {
+    if (!Array.isArray(parsed.zips) || parsed.zips.length === 0) {
+      details.push("service_area_json zip mode requires non-empty zips[]");
+      return null;
+    }
+    return parsed;
+  }
+
+  details.push("service_area_json.mode must be 'radius' or 'zip'");
+  return null;
+}
+
+function buildBusinessProfilePatch(body) {
+  const details = [];
+  const patch = {};
+
+  if (Object.prototype.hasOwnProperty.call(body, "timezone")) {
+    const timezone = String(body.timezone || "").trim();
+    if (!timezone) details.push("timezone must be a non-empty string");
+    else patch.timezone = timezone;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "working_hours_json") || Object.prototype.hasOwnProperty.call(body, "working_hours")) {
+    const workingHours = validateWorkingHours(
+      Object.prototype.hasOwnProperty.call(body, "working_hours") ? body.working_hours : body.working_hours_json,
+      details
+    );
+    if (workingHours) patch.working_hours_json = JSON.stringify(workingHours);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "slot_duration_min")) {
+    const slotDuration = Number(body.slot_duration_min);
+    if (!Number.isInteger(slotDuration) || slotDuration < 15 || slotDuration > 240) {
+      details.push("slot_duration_min must be an integer between 15 and 240");
+    } else {
+      patch.slot_duration_min = slotDuration;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "buffer_min")) {
+    const bufferMin = Number(body.buffer_min);
+    if (!Number.isInteger(bufferMin) || bufferMin < 0 || bufferMin > 120) {
+      details.push("buffer_min must be an integer between 0 and 120");
+    } else {
+      patch.buffer_min = bufferMin;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "emergency_enabled")) {
+    const emergencyEnabledRaw = body.emergency_enabled;
+    const isBool = typeof emergencyEnabledRaw === "boolean";
+    const isNumericFlag = emergencyEnabledRaw === 0 || emergencyEnabledRaw === 1 || emergencyEnabledRaw === "0" || emergencyEnabledRaw === "1";
+    if (!isBool && !isNumericFlag) {
+      details.push("emergency_enabled must be boolean or 0/1");
+    } else {
+      patch.emergency_enabled = emergencyEnabledRaw === true || emergencyEnabledRaw === 1 || emergencyEnabledRaw === "1" ? 1 : 0;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "emergency_phone")) {
+    const emergencyPhone = body.emergency_phone == null ? null : String(body.emergency_phone).trim();
+    if (emergencyPhone) {
+      const digits = emergencyPhone.replace(/\D/g, "");
+      if (digits.length < 7) {
+        details.push("emergency_phone must contain at least 7 digits");
+      }
+    }
+    patch.emergency_phone = emergencyPhone;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "service_area_json") || Object.prototype.hasOwnProperty.call(body, "service_area")) {
+    const serviceArea = validateServiceArea(
+      Object.prototype.hasOwnProperty.call(body, "service_area") ? body.service_area : body.service_area_json,
+      details
+    );
+    if (serviceArea) patch.service_area_json = JSON.stringify(serviceArea);
+  }
+
+  return { patch, details };
+}
+
 
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
@@ -319,6 +499,47 @@ app.get("/debug/calendar-business", async (req, res) => {
 });
 
 // --------------------
+// Business profile API
+// --------------------
+app.get("/api/businesses/:businessId/profile", async (req, res) => {
+  try {
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
+
+    const businessId = String(req.params.businessId || "");
+    const business = await data.getBusinessById(businessId);
+    if (!business) return res.status(404).json({ error: "Business not found", details: [] });
+
+    const profile = await data.getEffectiveBusinessProfile(businessId);
+    return res.status(200).json({ ok: true, profile: normalizeBusinessProfileForResponse(profile) });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "Internal error" });
+  }
+});
+
+app.put("/api/businesses/:businessId/profile", async (req, res) => {
+  try {
+    if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
+
+    const businessId = String(req.params.businessId || "");
+    const business = await data.getBusinessById(businessId);
+    if (!business) return res.status(404).json({ error: "Business not found", details: [] });
+
+    const { patch, details } = buildBusinessProfilePatch(req.body || {});
+    if (details.length > 0) {
+      return res.status(400).json({ error: "Validation failed", details });
+    }
+
+    if (Object.keys(patch).length > 0) {
+      await data.updateBusinessProfile(businessId, patch);
+    }
+    const profile = await data.getEffectiveBusinessProfile(businessId);
+    return res.status(200).json({ ok: true, profile: normalizeBusinessProfileForResponse(profile) });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "Internal error" });
+  }
+});
+
+// --------------------
 // Slots API
 // --------------------
 app.get("/api/available-slots", async (req, res) => {
@@ -331,11 +552,12 @@ app.get("/api/available-slots", async (req, res) => {
     const business = await data.getBusinessById(businessId);
     if (!business) return res.status(404).json({ ok: false, error: "Business not found" });
 
-    const tz = business.timezone || "America/Chicago";
+    const profile = await data.getEffectiveBusinessProfile(businessId);
+    const tz = profile.timezone || business.timezone || "America/Chicago";
 
     const durationMin = req.query.duration_min
       ? Number(req.query.duration_min)
-      : Number(business.default_duration_min || 60);
+      : Number(profile.slot_duration_min || business.default_duration_min || 60);
 
     const dur = Number(durationMin);
     if (!Number.isFinite(dur) || dur <= 0 || dur > 8 * 60) {
@@ -373,13 +595,27 @@ app.get("/api/available-slots", async (req, res) => {
     });
 
     const busy = fb?.data?.calendars?.primary?.busy || [];
-    const bufferBefore = Number(business.buffer_before_min || business.buffer_min || business.buffer_minutes || 0);
-    const bufferAfter = Number(business.buffer_after_min || business.buffer_min || business.buffer_minutes || 0);
+    const profileBuffer = Number(profile.buffer_min);
+    const bufferBefore = Number.isFinite(profileBuffer)
+      ? profileBuffer
+      : Number(business.buffer_before_min || business.buffer_min || business.buffer_minutes || 0);
+    const bufferAfter = Number.isFinite(profileBuffer)
+      ? profileBuffer
+      : Number(business.buffer_after_min || business.buffer_min || business.buffer_minutes || 0);
 
     const busyMergedUtc = normalizeBusyUtc(busy, bufferBefore, bufferAfter);
 
+    const slotsBusiness = {
+      ...business,
+      timezone: tz,
+      working_hours_json: JSON.stringify(profile.working_hours),
+      default_duration_min: Number(profile.slot_duration_min || business.default_duration_min || 60),
+      buffer_before_min: bufferBefore,
+      buffer_after_min: bufferAfter,
+    };
+
     const slots = generateSlots({
-      business,
+      business: slotsBusiness,
       windowStartDate: windowStartZ,
       days,
       durationMin: dur,

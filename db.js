@@ -162,6 +162,133 @@ export async function assertBusinessExists(db, businessId) {
   return true;
 }
 
+const DEFAULT_WORKING_HOURS = {
+  mon: [{ start: "09:00", end: "17:00" }],
+  tue: [{ start: "09:00", end: "17:00" }],
+  wed: [{ start: "09:00", end: "17:00" }],
+  thu: [{ start: "09:00", end: "17:00" }],
+  fri: [{ start: "09:00", end: "17:00" }],
+  sat: [{ start: "10:00", end: "14:00" }],
+  sun: [],
+};
+
+const DEFAULT_SERVICE_AREA = {
+  mode: "radius",
+  center: { lat: 32.7767, lng: -96.7970 },
+  miles: 30,
+};
+
+export const DEFAULT_BUSINESS_PROFILE = {
+  timezone: "America/Chicago",
+  working_hours: DEFAULT_WORKING_HOURS,
+  slot_duration_min: 60,
+  buffer_min: 15,
+  emergency_enabled: 1,
+  emergency_phone: null,
+  service_area: DEFAULT_SERVICE_AREA,
+};
+
+function safeParseJson(value, fallback) {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeBusinessProfileRow(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    working_hours: safeParseJson(row.working_hours_json, DEFAULT_WORKING_HOURS),
+    service_area: safeParseJson(row.service_area_json, DEFAULT_SERVICE_AREA),
+    emergency_enabled: Number(row.emergency_enabled) ? 1 : 0,
+  };
+}
+
+export async function getBusinessProfile(db, businessId) {
+  const row = await get(
+    db,
+    `SELECT business_id, timezone, working_hours_json, slot_duration_min, buffer_min,
+            emergency_enabled, emergency_phone, service_area_json,
+            created_at_utc, updated_at_utc
+     FROM business_profiles
+     WHERE business_id = ?
+     LIMIT 1`,
+    [businessId]
+  );
+
+  return normalizeBusinessProfileRow(row);
+}
+
+export async function upsertBusinessProfile(db, businessId, patch = {}) {
+  const now = new Date().toISOString();
+  const emergencyPhoneProvided = Object.prototype.hasOwnProperty.call(patch, "emergency_phone");
+
+  await run(
+    db,
+    `INSERT INTO business_profiles (
+      business_id,
+      timezone,
+      working_hours_json,
+      slot_duration_min,
+      buffer_min,
+      emergency_enabled,
+      emergency_phone,
+      service_area_json,
+      created_at_utc,
+      updated_at_utc
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(business_id) DO UPDATE SET
+      timezone = COALESCE(excluded.timezone, business_profiles.timezone),
+      working_hours_json = COALESCE(excluded.working_hours_json, business_profiles.working_hours_json),
+      slot_duration_min = COALESCE(excluded.slot_duration_min, business_profiles.slot_duration_min),
+      buffer_min = COALESCE(excluded.buffer_min, business_profiles.buffer_min),
+      emergency_enabled = COALESCE(excluded.emergency_enabled, business_profiles.emergency_enabled),
+      emergency_phone = CASE
+        WHEN excluded.emergency_phone IS NULL AND ? = 0 THEN business_profiles.emergency_phone
+        ELSE excluded.emergency_phone
+      END,
+      service_area_json = COALESCE(excluded.service_area_json, business_profiles.service_area_json),
+      updated_at_utc = excluded.updated_at_utc`,
+    [
+      businessId,
+      patch.timezone ?? null,
+      patch.working_hours_json ?? null,
+      patch.slot_duration_min ?? null,
+      patch.buffer_min ?? null,
+      patch.emergency_enabled ?? null,
+      patch.emergency_phone ?? null,
+      patch.service_area_json ?? null,
+      now,
+      now,
+      emergencyPhoneProvided ? 1 : 0,
+    ]
+  );
+
+  return getBusinessProfile(db, businessId);
+}
+
+export async function getEffectiveBusinessProfile(db, businessId) {
+  await assertBusinessExists(db, businessId);
+  const row = await getBusinessProfile(db, businessId);
+
+  return {
+    business_id: businessId,
+    timezone: row?.timezone || DEFAULT_BUSINESS_PROFILE.timezone,
+    working_hours: row?.working_hours || DEFAULT_BUSINESS_PROFILE.working_hours,
+    slot_duration_min: Number(row?.slot_duration_min || DEFAULT_BUSINESS_PROFILE.slot_duration_min),
+    buffer_min: Number(row?.buffer_min ?? DEFAULT_BUSINESS_PROFILE.buffer_min),
+    emergency_enabled: Number(row?.emergency_enabled ?? DEFAULT_BUSINESS_PROFILE.emergency_enabled) ? 1 : 0,
+    emergency_phone: row?.emergency_phone ?? DEFAULT_BUSINESS_PROFILE.emergency_phone,
+    service_area: row?.service_area || DEFAULT_BUSINESS_PROFILE.service_area,
+    created_at_utc: row?.created_at_utc || null,
+    updated_at_utc: row?.updated_at_utc || null,
+  };
+}
+
 // --- google tokens (single source of truth) ---
 export async function upsertGoogleTokens(db, businessId, tokens) {
   const {

@@ -11,6 +11,9 @@ import {
   getGoogleTokens,
   upsertGoogleTokens,
   assertBusinessExists,
+  getBusinessProfile,
+  upsertBusinessProfile,
+  getEffectiveBusinessProfile,
 
   // debug
   listTables,
@@ -57,6 +60,9 @@ export function makeSqliteData(db) {
     getGoogleTokens: (businessId) => getGoogleTokens(db, businessId),
     upsertGoogleTokens: (businessId, tokens) => upsertGoogleTokens(db, businessId, tokens),
     assertBusinessExists: (businessId) => assertBusinessExists(db, businessId),
+    getBusinessProfile: (businessId) => getBusinessProfile(db, businessId),
+    updateBusinessProfile: (businessId, patch) => upsertBusinessProfile(db, businessId, patch),
+    getEffectiveBusinessProfile: (businessId) => getEffectiveBusinessProfile(db, businessId),
 
     // bookings
     cleanupExpiredHolds: (businessId) => cleanupExpiredHolds(db, businessId),
