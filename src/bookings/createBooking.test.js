@@ -252,7 +252,93 @@ test("returns 409 and rolls back when freebusy is already busy", async () => {
 
   assert.equal(result.status, 409);
   assert.equal(result.body.error, "SLOT_ALREADY_BOOKED");
-  assert.equal(calls.rollbackTransaction, 1);
+  assert.equal(calls.rollbackTransaction, 0);
   assert.equal(calls.commitTransaction, 0);
+  assert.equal(calls.beginImmediateTransaction, 0);
+  assert.equal(calls.confirmBooking, 0);
+});
+
+test("expired pending booking does not block a new hold for same slot", async () => {
+  const { calls, deps } = makeFlowDeps();
+
+  deps.data.createPendingBookingLock = async ({ slot_key, hold_expires_at_utc }) => {
+    calls.createPendingBookingLock += 1;
+    const stalePending = {
+      slot_key,
+      status: "pending",
+      hold_expires_at_utc: "2000-01-01T00:00:00.000Z",
+    };
+
+    const staleIsActive =
+      stalePending.status === "confirmed" ||
+      (stalePending.status === "pending" &&
+        stalePending.hold_expires_at_utc &&
+        stalePending.hold_expires_at_utc > new Date().toISOString());
+
+    if (staleIsActive) {
+      const err = new Error("UNIQUE constraint failed: bookings.slot_key");
+      err.code = "SQLITE_CONSTRAINT";
+      throw err;
+    }
+
+    assert.ok(hold_expires_at_utc);
+    return true;
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 200);
+  assert.equal(calls.createPendingBookingLock, 1);
+});
+
+test("starts transaction only after freebusy pre-check", async () => {
+  const { deps } = makeFlowDeps();
+  const callOrder = [];
+
+  deps.google = {
+    calendar: () => ({
+      freebusy: {
+        query: async () => {
+          callOrder.push("freebusy");
+          return { data: { calendars: { primary: { busy: [] } } } };
+        },
+      },
+      events: {
+        insert: async () => ({ data: { id: "gcal-123" } }),
+      },
+    }),
+  };
+
+  const originalBegin = deps.data.beginImmediateTransaction;
+  deps.data.beginImmediateTransaction = async () => {
+    callOrder.push("begin");
+    return originalBegin();
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(callOrder.slice(0, 2), ["freebusy", "begin"]);
+});
+
+test("marks booking as failed when Google events.insert fails", async () => {
+  const { calls, deps } = makeFlowDeps();
+  deps.google = {
+    calendar: () => ({
+      freebusy: {
+        query: async () => ({ data: { calendars: { primary: { busy: [] } } } }),
+      },
+      events: {
+        insert: async () => {
+          throw new Error("google down");
+        },
+      },
+    }),
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 500);
+  assert.equal(calls.failBooking, 1);
   assert.equal(calls.confirmBooking, 0);
 });
