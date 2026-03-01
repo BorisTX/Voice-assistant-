@@ -32,8 +32,6 @@ import {
 
 const app = express();
 app.set("trust proxy", 1);
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
 
 app.use((req, res, next) => {
   const incoming = req.get("x-request-id") || req.get("x-correlation-id") || null;
@@ -58,6 +56,36 @@ app.use((req, res, next) => {
 
   next();
 });
+
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+
+  res.json = (body) => {
+    const requestId = req.requestId || res.locals.requestId || null;
+
+    if (res.statusCode >= 400) {
+      if (body && typeof body === "object" && !Array.isArray(body)) {
+        return originalJson({
+          ok: body.ok ?? false,
+          ...body,
+          requestId,
+        });
+      }
+      return originalJson({
+        ok: false,
+        error: body,
+        requestId,
+      });
+    }
+
+    return originalJson(body);
+  };
+
+  next();
+});
+
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 
 let isReady = false;
 let isShuttingDown = false;
@@ -93,9 +121,13 @@ app.get("/healthz", (req, res) => {
 
 app.get("/readyz", (req, res) => {
   const ready = isReady && !isShuttingDown && server && server.listening;
+
   if (!ready) {
-    return res.status(503).json({ ok: false, error: "NOT_READY", requestId: req.requestId });
+    return res.status(503).json({
+      error: "NOT_READY"
+    });
   }
+
   return res.status(200).json({ ok: true });
 });
 
@@ -129,14 +161,12 @@ function withTimeout(promise, ms, label, requestId = null) {
       return result;
     })
     .catch((error) => {
-      const duration_ms = Math.round(nowMs() - t0);
       console.error(JSON.stringify({
         level: "error",
         type: "google_api",
-        requestId,
         op: label,
-        ok: false,
-        duration_ms,
+        requestId,
+        status_code: 500,
         error: String(error?.message || error),
       }));
       throw error;
@@ -913,7 +943,7 @@ app.post("/voice", async (req, res) => {
 
 app.use((req, res) => {
   console.log(JSON.stringify({ level: "info", type: "not_found", requestId: req.requestId, method: req.method, path: req.path }));
-  res.status(404).json({ ok: false, error: "Not Found" });
+  res.status(404).json({ error: "Not Found" });
 });
 
 app.use((err, req, res, next) => {
@@ -921,7 +951,7 @@ app.use((err, req, res, next) => {
     return next(err);
   }
 
-  const requestId = req.requestId || res.locals?.requestId || null;
+  const requestId = req.requestId || res.locals.requestId || null;
   const statusCandidate = err?.statusCode ?? err?.status;
   const status_code = Number.isFinite(statusCandidate) ? statusCandidate : 500;
 
@@ -935,7 +965,9 @@ app.use((err, req, res, next) => {
     error: String(err?.message || err),
   }));
 
-  return res.status(status_code).json({ ok: false, error: "Internal error", requestId });
+  return res.status(status_code).json({
+    error: "Internal error"
+  });
 });
 
 // --------------------
