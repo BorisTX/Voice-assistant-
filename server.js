@@ -9,6 +9,8 @@ import { DateTime } from "luxon";
 import { performance } from "node:perf_hooks";
 
 import { verifyOAuthState } from "./src/security/state.js";
+import { createApiSecurityMiddleware } from "./src/security/apiSecurity.js";
+import { sanitizeDebugPayload } from "./src/security/pii.js";
 import { normalizeBusyUtc, generateSlots } from "./src/slots.js";
 import { openDb, runMigrations } from "./src/db/migrate.js";
 import { makeDataLayer } from "./src/data/index.js";
@@ -261,8 +263,26 @@ function buildBusinessProfilePatch(body) {
 app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.use("/debug", (req, res, next) => {
-  if (process.env.DEBUG_ROUTES === "1") return next();
-  return res.status(404).send("Not Found");
+  if (process.env.DEBUG_ROUTES !== "1") {
+    return res.status(404).send("Not Found");
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    const configuredDebugKey = String(process.env.DEBUG_ADMIN_KEY || "").trim();
+    const directDebugKey = String(req.header("x-debug-key") || "").trim();
+    const authHeader = String(req.header("authorization") || "");
+    const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+    const bearerDebugKey = bearerMatch ? String(bearerMatch[1] || "").trim() : "";
+    const requestDebugKey = directDebugKey || bearerDebugKey;
+
+    if (!configuredDebugKey || requestDebugKey !== configuredDebugKey) {
+      return res.status(404).send("Not Found");
+    }
+  }
+
+  const json = res.json.bind(res);
+  res.json = (payload) => json(sanitizeDebugPayload(payload));
+  return next();
 });
 
 // --------------------
@@ -523,6 +543,8 @@ app.get("/debug/calendar-business", async (req, res) => {
 // --------------------
 // Business profile API
 // --------------------
+app.use("/api", createApiSecurityMiddleware());
+
 app.get("/api/businesses/:businessId/profile", async (req, res) => {
   try {
     if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
