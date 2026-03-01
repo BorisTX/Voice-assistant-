@@ -789,7 +789,7 @@ test("error logs include requestId when provided", async () => {
 
     assert.equal(result.status, 200);
     assert.ok(errors.some((line) => line.includes('"phase":"sms"')));
-    assert.ok(errors.some((line) => line.includes(`"requestId":"${deps.requestId}"`)));
+    assert.ok(errors.some((line) => line.includes('"requestId":"test-request-id"')));
   } finally {
     console.error = originalError;
   }

@@ -213,7 +213,9 @@ export async function createBookingFlow({
   const businessId = input.businessId;
 
   const log = (level, phase, msg, extra = {}) => {
-    const logger = level === "error" ? console.error : console.log;
+    const logger = level === "error"
+      ? console.error
+      : (level === "warn" ? console.warn : console.log);
     logger(JSON.stringify({ level, phase, businessId, bookingId, requestId, msg, ...extra }));
   };
 
