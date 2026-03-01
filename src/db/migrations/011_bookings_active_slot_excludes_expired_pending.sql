@@ -6,5 +6,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_bookings_active_slot_key
      OR (
        status = 'pending'
        AND hold_expires_at_utc IS NOT NULL
-       AND hold_expires_at_utc > CURRENT_TIMESTAMP
+       AND julianday(hold_expires_at_utc) > julianday('now')
      );

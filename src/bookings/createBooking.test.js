@@ -321,6 +321,55 @@ test("starts transaction only after freebusy pre-check", async () => {
   assert.deepEqual(callOrder.slice(0, 2), ["freebusy", "begin"]);
 });
 
+
+test("runs google events.insert with no write transaction open", async () => {
+  const { deps } = makeFlowDeps();
+  const callOrder = [];
+  let txOpen = false;
+
+  const originalBegin = deps.data.beginImmediateTransaction;
+  const originalCommit = deps.data.commitTransaction;
+  const originalRollback = deps.data.rollbackTransaction;
+
+  deps.data.beginImmediateTransaction = async () => {
+    callOrder.push("begin");
+    txOpen = true;
+    return originalBegin();
+  };
+
+  deps.data.commitTransaction = async () => {
+    callOrder.push("commit");
+    txOpen = false;
+    return originalCommit();
+  };
+
+  deps.data.rollbackTransaction = async () => {
+    callOrder.push("rollback");
+    txOpen = false;
+    return originalRollback();
+  };
+
+  deps.google = {
+    calendar: () => ({
+      freebusy: {
+        query: async () => ({ data: { calendars: { primary: { busy: [] } } } }),
+      },
+      events: {
+        insert: async () => {
+          callOrder.push("events.insert");
+          assert.equal(txOpen, false);
+          return { data: { id: "gcal-123" } };
+        },
+      },
+    }),
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(callOrder.slice(0, 3), ["begin", "commit", "events.insert"]);
+});
+
 test("marks booking as failed when Google events.insert fails", async () => {
   const { calls, deps } = makeFlowDeps();
   deps.google = {
