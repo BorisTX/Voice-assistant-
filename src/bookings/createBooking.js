@@ -3,6 +3,7 @@ import { DateTime } from "luxon";
 import { sendBookingConfirmation } from "../sms/sendBookingConfirmation.js";
 import { handleEmergency } from "../emergency/handleEmergency.js";
 import { isOutsideBusinessHours } from "../emergency/businessHours.js";
+import { getRetryErrorDetails, isRetryableGoogleError, retry } from "./retry.js";
 
 function toSafeErrorCode(error) {
   const message = String(error?.message || "");
@@ -160,6 +161,7 @@ export async function createBookingFlow({
   nowFn = () => DateTime.now(),
   sendBookingConfirmationFn = sendBookingConfirmation,
   handleEmergencyFn = handleEmergency,
+  requestId = null,
 }) {
   let bookingId = null;
   const input = normalizeInput(body);
@@ -265,16 +267,28 @@ export async function createBookingFlow({
     }
 
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
-    const freeBusy = await withTimeout(
-      calendar.freebusy.query({
-        requestBody: {
-          timeMin: schedule.startUtcIso,
-          timeMax: schedule.endUtcIso,
-          items: [{ id: "primary" }],
-        },
-      }),
-      googleApiTimeoutMs,
-      "google.freebusy.query"
+    const googleOpTimeoutMs = Math.min(googleApiTimeoutMs, 2500);
+    const freeBusy = await retry(
+      () => withTimeout(
+        calendar.freebusy.query({
+          requestBody: {
+            timeMin: schedule.startUtcIso,
+            timeMax: schedule.endUtcIso,
+            items: [{ id: "primary" }],
+          },
+        }),
+        googleOpTimeoutMs,
+        "google.freebusy"
+      ),
+      {
+        label: "google.freebusy",
+        maxAttempts: 3,
+        baseDelayMs: 250,
+        maxDelayMs: 1500,
+        retryOn: isRetryableGoogleError,
+        requestId,
+        maxElapsedMs: 4500,
+      }
     );
 
     const busyRanges = freeBusy?.data?.calendars?.primary?.busy || [];
@@ -346,33 +360,107 @@ export async function createBookingFlow({
       return { status: 500, body: { ok: false, error: "Internal error" } };
     }
 
-    try {
-      created = await withTimeout(
-        calendar.events.insert({
-          calendarId: "primary",
-          requestBody: {
-            summary: `${isEmergency ? "🚨 " : ""}${input.service || "HVAC"} - ${input.customer?.name || "Customer"}`,
-            description: `${buildCalendarDescription({ bookingId, customer: input.customer, notes: input.notes })}\nIdempotency-Key: ${idempotencyKey}`,
-            extendedProperties: { private: { idempotencyKey } },
-            start: {
-              dateTime: schedule.startUtcIso,
-              timeZone: input.timezone,
-            },
-            end: {
-              dateTime: schedule.endUtcIso,
-              timeZone: input.timezone,
-            },
-          },
-        }),
-        googleApiTimeoutMs,
-        "google.events.insert"
-      );
-    } catch {
-      await data.failBooking(bookingId, "GOOGLE_EVENTS_INSERT_FAILED");
-      return { status: 500, body: { ok: false, error: "Internal error" } };
+    const insertParams = {
+      calendarId: "primary",
+      requestBody: {
+        summary: `${isEmergency ? "🚨 " : ""}${input.service || "HVAC"} - ${input.customer?.name || "Customer"}`,
+        description: `${buildCalendarDescription({ bookingId, customer: input.customer, notes: input.notes })}\nIdempotency-Key: ${idempotencyKey}`,
+        extendedProperties: { private: { idempotencyKey } },
+        start: {
+          dateTime: schedule.startUtcIso,
+          timeZone: input.timezone,
+        },
+        end: {
+          dateTime: schedule.endUtcIso,
+          timeZone: input.timezone,
+        },
+      },
+    };
+
+    let bookingAlreadyConfirmed = false;
+    for (let insertAttempt = 1; insertAttempt <= 2; insertAttempt += 1) {
+      try {
+        created = await withTimeout(
+          calendar.events.insert(insertParams),
+          googleOpTimeoutMs,
+          "google.events.insert"
+        );
+        break;
+      } catch (insertError) {
+        const transientInsert = isRetryableGoogleError(insertError);
+        if (!idempotencyKey || !transientInsert || insertAttempt >= 2) {
+          await data.failBooking(bookingId, "GOOGLE_EVENTS_INSERT_FAILED");
+          return { status: 500, body: { ok: false, error: "Internal error" } };
+        }
+
+        const details = getRetryErrorDetails(insertError);
+        console.warn(JSON.stringify({
+          level: "warn",
+          type: "insert-failed-transient",
+          requestId,
+          bookingId,
+          idempotencyKey,
+          ...details,
+        }));
+
+        const startMinusOneDayIso = DateTime.fromISO(schedule.startUtcIso, { zone: "utc" }).minus({ days: 1 }).toISO();
+        const endPlusOneDayIso = DateTime.fromISO(schedule.endUtcIso, { zone: "utc" }).plus({ days: 1 }).toISO();
+
+        let existingEvent = null;
+        try {
+          const existingEventSearch = await retry(
+            () => withTimeout(
+              calendar.events.list({
+                calendarId: "primary",
+                timeMin: startMinusOneDayIso,
+                timeMax: endPlusOneDayIso,
+                singleEvents: true,
+                privateExtendedProperty: `idempotencyKey=${idempotencyKey}`,
+              }),
+              googleOpTimeoutMs,
+              "google.events.list.idempotency"
+            ),
+            {
+              label: "google.events.list.idempotency",
+              maxAttempts: 2,
+              baseDelayMs: 250,
+              maxDelayMs: 1000,
+              retryOn: isRetryableGoogleError,
+              requestId,
+              maxElapsedMs: 2500,
+            }
+          );
+          existingEvent = existingEventSearch?.data?.items?.[0] || null;
+        } catch {}
+
+        if (existingEvent?.id) {
+          console.log(JSON.stringify({
+            level: "info",
+            type: "insert-detected-existing-event",
+            requestId,
+            bookingId,
+            gcalEventId: existingEvent.id,
+          }));
+          await data.confirmBooking(bookingId, existingEvent.id);
+          bookingAlreadyConfirmed = true;
+          created = { data: { id: existingEvent.id } };
+          break;
+        }
+
+        console.warn(JSON.stringify({
+          level: "warn",
+          type: "retry",
+          requestId,
+          label: "google.events.insert",
+          attempt: insertAttempt,
+          ...details,
+        }));
+      }
     }
 
-    await data.confirmBooking(bookingId, created?.data?.id || null);
+    if (!bookingAlreadyConfirmed) {
+      await data.confirmBooking(bookingId, created?.data?.id || null);
+    }
 
     log("info", "confirm", "Booking confirmed", { gcalEventId: created?.data?.id || null, isEmergency });
 

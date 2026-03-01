@@ -14,6 +14,8 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
     getBookingByIdempotencyKey: 0,
     cleanupExpiredHolds: 0,
     googleInsert: 0,
+    googleEventsList: 0,
+    googleFreebusy: 0,
     lastGoogleInsertRequestBody: null,
     beginImmediateTransaction: 0,
     commitTransaction: 0,
@@ -81,13 +83,20 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
   const google = {
     calendar: () => ({
       freebusy: {
-        query: async () => ({ data: { calendars: { primary: { busy: [] } } } }),
+        query: async () => {
+          calls.googleFreebusy += 1;
+          return { data: { calendars: { primary: { busy: [] } } } };
+        },
       },
       events: {
         insert: async ({ requestBody }) => {
           calls.googleInsert += 1;
           calls.lastGoogleInsertRequestBody = requestBody;
           return { data: { id: "gcal-123" } };
+        },
+        list: async () => {
+          calls.googleEventsList += 1;
+          return { data: { items: [] } };
         },
       },
     }),
@@ -514,4 +523,115 @@ test("adds idempotency key to Google event description and extendedProperties", 
   assert.equal(calls.googleInsert, 1);
   assert.ok(calls.lastGoogleInsertRequestBody.description.includes("Idempotency-Key:"));
   assert.ok(calls.lastGoogleInsertRequestBody.extendedProperties.private.idempotencyKey);
+});
+
+test("when events.insert times out once but events.list finds event, confirms without duplicate insert", async () => {
+  const { calls, deps } = makeFlowDeps();
+
+  deps.google = {
+    calendar: () => ({
+      freebusy: {
+        query: async () => {
+          calls.googleFreebusy += 1;
+          return { data: { calendars: { primary: { busy: [] } } } };
+        },
+      },
+      events: {
+        insert: async ({ requestBody }) => {
+          calls.googleInsert += 1;
+          calls.lastGoogleInsertRequestBody = requestBody;
+          if (calls.googleInsert === 1) {
+            const err = new Error("timed out");
+            err.response = { status: 500 };
+            throw err;
+          }
+          return { data: { id: "gcal-after-timeout" } };
+        },
+        list: async () => {
+          calls.googleEventsList += 1;
+          return { data: { items: [{ id: "gcal-existing" }] } };
+        },
+      },
+    }),
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 200);
+  assert.equal(calls.googleInsert, 1);
+  assert.equal(calls.googleEventsList, 1);
+  assert.equal(calls.confirmBooking, 1);
+  assert.equal(result.body.gcalEventId, "gcal-existing");
+});
+
+test("when events.insert transiently fails and list finds nothing, insert retries once", async () => {
+  const { calls, deps } = makeFlowDeps();
+
+  deps.google = {
+    calendar: () => ({
+      freebusy: {
+        query: async () => {
+          calls.googleFreebusy += 1;
+          return { data: { calendars: { primary: { busy: [] } } } };
+        },
+      },
+      events: {
+        insert: async ({ requestBody }) => {
+          calls.googleInsert += 1;
+          calls.lastGoogleInsertRequestBody = requestBody;
+          if (calls.googleInsert === 1) {
+            const err = new Error("server error");
+            err.response = { status: 500 };
+            throw err;
+          }
+          return { data: { id: "gcal-second-attempt" } };
+        },
+        list: async () => {
+          calls.googleEventsList += 1;
+          return { data: { items: [] } };
+        },
+      },
+    }),
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 200);
+  assert.equal(calls.googleInsert, 2);
+  assert.equal(calls.googleEventsList, 1);
+  assert.equal(result.body.gcalEventId, "gcal-second-attempt");
+});
+
+test("freebusy retries once on 500 then succeeds", async () => {
+  const { calls, deps } = makeFlowDeps();
+
+  deps.google = {
+    calendar: () => ({
+      freebusy: {
+        query: async () => {
+          calls.googleFreebusy += 1;
+          if (calls.googleFreebusy === 1) {
+            const err = new Error("temporary failure");
+            err.response = { status: 500 };
+            throw err;
+          }
+          return { data: { calendars: { primary: { busy: [] } } } };
+        },
+      },
+      events: {
+        insert: async ({ requestBody }) => {
+          calls.googleInsert += 1;
+          calls.lastGoogleInsertRequestBody = requestBody;
+          return { data: { id: "gcal-123" } };
+        },
+        list: async () => ({ data: { items: [] } }),
+      },
+    }),
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 200);
+  assert.equal(calls.googleFreebusy, 2);
+  assert.equal(calls.googleInsert, 1);
 });

@@ -728,6 +728,7 @@ app.get("/api/available-slots", async (req, res) => {
 });
 
 app.post("/api/bookings", async (req, res) => {
+  const requestId = req.get("x-request-id") || req.get("x-correlation-id") || null;
   const result = await createBookingFlow({
     data,
     body: req.body || {},
@@ -736,6 +737,7 @@ app.post("/api/bookings", async (req, res) => {
     google,
     googleApiTimeoutMs: GOOGLE_API_TIMEOUT_MS,
     withTimeout,
+    requestId,
   });
 
   return res.status(result.status).json(result.body);
@@ -747,6 +749,7 @@ app.post("/api/book", async (req, res) => {
   const businessId = req.body?.businessId ?? req.body?.business_id ?? null;
 
   try {
+    const requestId = req.get("x-request-id") || req.get("x-correlation-id") || null;
     const result = await createBookingFlow({
       data,
       body: req.body || {},
@@ -755,6 +758,7 @@ app.post("/api/book", async (req, res) => {
       google,
       googleApiTimeoutMs: GOOGLE_API_TIMEOUT_MS,
       withTimeout,
+      requestId,
     });
 
     const duration_ms = Math.round(nowMs() - t0);
