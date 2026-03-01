@@ -59,20 +59,6 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use((req, res, next) => {
-  const originalJson = res.json.bind(res);
-  res.json = (body) => {
-    if (res.statusCode >= 400) {
-      const requestId = req.requestId || res.locals.requestId || null;
-      if (body && typeof body === "object" && !Array.isArray(body)) {
-        return originalJson({ ...body, requestId });
-      }
-    }
-    return originalJson(body);
-  };
-  next();
-});
-
 let isReady = false;
 let isShuttingDown = false;
 let activeRequests = 0;
@@ -108,7 +94,7 @@ app.get("/healthz", (req, res) => {
 app.get("/readyz", (req, res) => {
   const ready = isReady && !isShuttingDown && server && server.listening;
   if (!ready) {
-    return res.status(503).json({ ok: false, error: "NOT_READY" });
+    return res.status(503).json({ ok: false, error: "NOT_READY", requestId: req.requestId });
   }
   return res.status(200).json({ ok: true });
 });
@@ -124,7 +110,7 @@ const GOOGLE_API_TIMEOUT_MS = (() => {
   return Number.isFinite(value) && value > 0 ? value : GOOGLE_API_TIMEOUT_MS_DEFAULT;
 })();
 
-function withTimeout(promise, ms, label) {
+function withTimeout(promise, ms, label, requestId = null) {
   const t0 = nowMs();
   let timer;
   return Promise.race([
@@ -147,7 +133,7 @@ function withTimeout(promise, ms, label) {
       console.error(JSON.stringify({
         level: "error",
         type: "google_api",
-        requestId: null,
+        requestId,
         op: label,
         ok: false,
         duration_ms,
@@ -742,7 +728,8 @@ app.get("/api/available-slots", async (req, res) => {
         },
       }),
       GOOGLE_API_TIMEOUT_MS,
-      "google.freebusy.query"
+      "google.freebusy.query",
+      req.requestId
     );
 
     const busy = fb?.data?.calendars?.primary?.busy || [];
@@ -927,6 +914,28 @@ app.post("/voice", async (req, res) => {
 app.use((req, res) => {
   console.log(JSON.stringify({ level: "info", type: "not_found", requestId: req.requestId, method: req.method, path: req.path }));
   res.status(404).json({ ok: false, error: "Not Found" });
+});
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  const requestId = req.requestId || res.locals?.requestId || null;
+  const statusCandidate = err?.statusCode ?? err?.status;
+  const status_code = Number.isFinite(statusCandidate) ? statusCandidate : 500;
+
+  console.error(JSON.stringify({
+    level: "error",
+    type: "unhandled",
+    route: req.path,
+    method: req.method,
+    requestId,
+    status_code,
+    error: String(err?.message || err),
+  }));
+
+  return res.status(status_code).json({ ok: false, error: "Internal error", requestId });
 });
 
 // --------------------
