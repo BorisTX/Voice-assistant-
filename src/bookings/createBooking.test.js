@@ -7,7 +7,12 @@ function flushAsync() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = { escalated: true } } = {}) {
+function makeFlowDeps({
+  sendSmsOk = true,
+  bodyOverrides = {},
+  emergencyResult = { escalated: true },
+  requestId = "test-request-id",
+} = {}) {
   const nowInChicago = DateTime.fromISO("2026-01-01T09:00:00", { zone: "America/Chicago" });
   const calls = {
     createPendingBookingLock: 0,
@@ -134,6 +139,7 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
       nowFn: () => nowInChicago,
       sendBookingConfirmationFn,
       handleEmergencyFn,
+      requestId,
     },
   };
 }
@@ -629,6 +635,7 @@ test("when events.list finds wrong event schedule/key, booking is not confirmed 
     assert.equal(calls.confirmBooking, 0);
     assert.ok(warnings.some((line) => line.includes('"type":"idempotency-mismatch"')));
     assert.ok(warnings.some((line) => line.includes('"reason":"datetime-outside-tolerance"')));
+    assert.ok(warnings.some((line) => line.includes(`"requestId":"${deps.requestId}"`)));
   } finally {
     console.warn = originalWarn;
   }

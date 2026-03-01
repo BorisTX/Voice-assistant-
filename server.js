@@ -35,6 +35,30 @@ app.set("trust proxy", 1);
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+app.use((req, res, next) => {
+  const incoming = req.get("x-request-id") || req.get("x-correlation-id") || null;
+  const requestId = incoming || (typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : crypto.randomBytes(16).toString("hex"));
+
+  req.requestId = requestId;
+  res.locals.requestId = requestId;
+  res.setHeader("X-Request-Id", requestId);
+
+  const isHealthPath = req.path === "/healthz" || req.path === "/readyz";
+  if (!isHealthPath) {
+    console.log(JSON.stringify({
+      level: "info",
+      type: "request",
+      requestId,
+      method: req.method,
+      path: req.path,
+    }));
+  }
+
+  next();
+});
+
 let isReady = false;
 let isShuttingDown = false;
 let activeRequests = 0;
@@ -728,19 +752,34 @@ app.get("/api/available-slots", async (req, res) => {
 });
 
 app.post("/api/bookings", async (req, res) => {
-  const requestId = req.get("x-request-id") || req.get("x-correlation-id") || null;
-  const result = await createBookingFlow({
-    data,
-    body: req.body || {},
-    makeOAuthClient,
-    loadTokensIntoClientForBusiness,
-    google,
-    googleApiTimeoutMs: GOOGLE_API_TIMEOUT_MS,
-    withTimeout,
-    requestId,
-  });
+  const requestId = req.requestId || req.get("x-request-id") || req.get("x-correlation-id") || null;
 
-  return res.status(result.status).json(result.body);
+  try {
+    const result = await createBookingFlow({
+      data,
+      body: req.body || {},
+      makeOAuthClient,
+      loadTokensIntoClientForBusiness,
+      google,
+      googleApiTimeoutMs: GOOGLE_API_TIMEOUT_MS,
+      withTimeout,
+      requestId,
+    });
+
+    const responseBody = result.status >= 500
+      ? { ...result.body, requestId }
+      : result.body;
+    return res.status(result.status).json(responseBody);
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      route: "/api/bookings",
+      requestId,
+      status_code: 500,
+      error: String(error?.message || error),
+    }));
+    return res.status(500).json({ ok: false, error: "Internal error", requestId });
+  }
 });
 
 app.post("/api/book", async (req, res) => {
@@ -749,7 +788,7 @@ app.post("/api/book", async (req, res) => {
   const businessId = req.body?.businessId ?? req.body?.business_id ?? null;
 
   try {
-    const requestId = req.get("x-request-id") || req.get("x-correlation-id") || null;
+    const requestId = req.requestId || req.get("x-request-id") || req.get("x-correlation-id") || null;
     const result = await createBookingFlow({
       data,
       body: req.body || {},
@@ -764,20 +803,25 @@ app.post("/api/book", async (req, res) => {
     const duration_ms = Math.round(nowMs() - t0);
     const status_code = result.status;
     const bookingId = result.body?.bookingId || null;
-    console.log(JSON.stringify({ level: "info", route, status_code, duration_ms, businessId, bookingId }));
-    return res.status(result.status).json(result.body);
+    console.log(JSON.stringify({ level: "info", route, requestId, status_code, duration_ms, businessId, bookingId }));
+    const responseBody = result.status >= 500
+      ? { ...result.body, requestId }
+      : result.body;
+    return res.status(result.status).json(responseBody);
   } catch (error) {
     const duration_ms = Math.round(nowMs() - t0);
+    const requestId = req.requestId || req.get("x-request-id") || req.get("x-correlation-id") || null;
     console.error(JSON.stringify({
       level: "error",
       route,
+      requestId,
       status_code: 500,
       duration_ms,
       businessId,
       bookingId: null,
       error: String(error?.message || error),
     }));
-    return res.status(500).json({ ok: false, error: "Internal error" });
+    return res.status(500).json({ ok: false, error: "Internal error", requestId });
   }
 });
 
@@ -968,7 +1012,7 @@ function closeDbGracefully() {
   return new Promise((resolve) => {
     db.close((err) => {
       if (err) {
-        console.error("DB close failed:", err);
+        console.error(JSON.stringify({ level: "error", type: "shutdown", requestId: null, msg: "DB close failed", error: String(err?.message || err) }));
       } else {
         console.log("DB closed");
       }
@@ -1002,7 +1046,7 @@ async function shutdown(signal) {
   console.log(`Received ${signal}. Starting graceful shutdown...`);
 
   const forceExitTimer = setTimeout(() => {
-    console.error(`Graceful shutdown timed out after ${SHUTDOWN_TIMEOUT_MS}ms. Forcing exit.`);
+    console.error(JSON.stringify({ level: "error", type: "shutdown", requestId: null, msg: `Graceful shutdown timed out after ${SHUTDOWN_TIMEOUT_MS}ms. Forcing exit.` }));
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS);
 
@@ -1030,7 +1074,7 @@ async function shutdown(signal) {
           wss.close(() => res());
         });
       } catch (err) {
-        console.error("wss.close failed", err);
+        console.error(JSON.stringify({ level: "error", type: "shutdown", requestId: null, msg: "wss.close failed", error: String(err?.message || err) }));
       }
     }
 
@@ -1059,7 +1103,7 @@ async function shutdown(signal) {
     process.exit(0);
   } catch (err) {
     clearTimeout(forceExitTimer);
-    console.error("Shutdown failed:", err);
+    console.error(JSON.stringify({ level: "error", type: "shutdown", requestId: null, msg: "Shutdown failed", error: String(err?.message || err) }));
     process.exit(1);
   }
 }
