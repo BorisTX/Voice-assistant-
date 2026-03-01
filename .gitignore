@@ -1,9 +1,14 @@
-﻿node_modules/
+node_modules/
+
 .env
+.env.*
+
 data.sqlite
 *.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
 .DS_Store
 npm-debug.log*
-.env.*
 *.db
-*.sqlite-journal
