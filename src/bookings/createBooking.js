@@ -40,20 +40,22 @@ function normalizeInput(body) {
   };
 }
 
-function validateAndBuildSchedule({ input, business }) {
+function validateAndBuildSchedule({ input, business, businessProfile }) {
   const errors = [];
   if (!input.businessId) errors.push("Missing businessId");
   if (!input.startLocal) errors.push("Missing startLocal");
   if (!input.timezone) errors.push("Missing timezone");
 
   const durationMins = Number(
-    input.durationMinsRaw != null ? input.durationMinsRaw : business.default_duration_min || 60
+    input.durationMinsRaw != null ? input.durationMinsRaw : businessProfile?.slot_duration_min || business.default_duration_min || 60
   );
   if (!Number.isFinite(durationMins) || durationMins <= 0 || durationMins > 8 * 60) {
     errors.push("Invalid durationMins");
   }
 
-  const defaultBuffer = Number(business.buffer_before_min || business.buffer_min || business.buffer_minutes || 0);
+  const defaultBuffer = Number(
+    businessProfile?.buffer_min ?? business.buffer_before_min ?? business.buffer_min ?? business.buffer_minutes ?? 0
+  );
   const bufferMins = Number(input.bufferMinsRaw != null ? input.bufferMinsRaw : defaultBuffer);
   if (!Number.isFinite(bufferMins) || bufferMins < 0 || bufferMins > 24 * 60) {
     errors.push("Invalid bufferMins");
@@ -116,7 +118,9 @@ export async function createBookingFlow({
       return { status: 404, body: { ok: false, error: "Business not found" } };
     }
 
-    const schedule = validateAndBuildSchedule({ input, business: business || {} });
+    const businessProfile = input.businessId ? await data.getEffectiveBusinessProfile(input.businessId) : null;
+
+    const schedule = validateAndBuildSchedule({ input, business: business || {}, businessProfile });
     if (!schedule.ok) {
       return { status: 400, body: { ok: false, error: schedule.errors.join("; ") } };
     }
@@ -125,10 +129,12 @@ export async function createBookingFlow({
     const isAfterHours = isOutsideBusinessHours({
       startUtc: schedule.startUtcIso,
       businessProfile: {
-        timezone: business?.timezone,
+        timezone: businessProfile?.timezone || business?.timezone,
         working_hours_start: business?.working_hours_start,
         working_hours_end: business?.working_hours_end,
-        working_hours_json: business?.working_hours_json,
+        working_hours_json: businessProfile?.working_hours
+          ? JSON.stringify(businessProfile.working_hours)
+          : business?.working_hours_json,
       },
     });
 
