@@ -72,11 +72,21 @@ function validateAndBuildSchedule({ input, business, businessProfile }) {
 
   return {
     ok: true,
+    durationMins,
     startUtcIso: startZ.toUTC().toISO(),
     endUtcIso: endZ.toUTC().toISO(),
     holdStartUtcIso: holdStartZ.toUTC().toISO(),
     holdEndUtcIso: holdEndZ.toUTC().toISO(),
   };
+}
+
+function normalizePhoneDigits(phone) {
+  return String(phone || "").replace(/\D/g, "");
+}
+
+function buildBookingIdempotencyKey({ businessId, startUtcIso, durationMins, phoneDigits }) {
+  const keyInput = `${businessId}|${startUtcIso}|${durationMins}|${phoneDigits}`;
+  return crypto.createHash("sha256").update(keyInput).digest("hex").slice(0, 32);
 }
 
 function validateBookingTimeWindow({ input, business, businessProfile, nowDt }) {
@@ -192,6 +202,28 @@ export async function createBookingFlow({
       };
     }
 
+    const idempotencyKey = buildBookingIdempotencyKey({
+      businessId: input.businessId,
+      startUtcIso: schedule.startUtcIso,
+      durationMins: schedule.durationMins,
+      phoneDigits: normalizePhoneDigits(input.customer?.phone),
+    });
+
+    const existingBooking = await data.getBookingByIdempotencyKey(input.businessId, idempotencyKey);
+    if (existingBooking) {
+      if (existingBooking.status === "confirmed") {
+        return {
+          status: 200,
+          body: { ok: true, status: "confirmed", bookingId: existingBooking.id },
+        };
+      }
+
+      return {
+        status: 202,
+        body: { ok: true, status: "pending", bookingId: existingBooking.id },
+      };
+    }
+
     const isEmergencyService = (input.service || "").toLowerCase() === "emergency";
     const isAfterHours = isOutsideBusinessHours({
       startUtc: schedule.startUtcIso,
@@ -273,6 +305,7 @@ export async function createBookingFlow({
         service_type: input.service || "HVAC",
         timezone: input.timezone,
         slot_key: slotKey,
+        idempotency_key: idempotencyKey,
         service: input.service,
         notes: input.notes,
         job_summary: isEmergency ? `[EMERGENCY] ${input.service || "HVAC"}` : input.service || "HVAC",
@@ -288,7 +321,27 @@ export async function createBookingFlow({
         } catch {}
       }
 
-      if (String(error?.code || "") === "SQLITE_CONSTRAINT" || String(error?.message || "").includes("UNIQUE")) {
+      const isSqliteConstraint = String(error?.code || "") === "SQLITE_CONSTRAINT";
+      const message = String(error?.message || "");
+      const isIdempotencyConstraint = message.includes("uniq_bookings_active_idempotency_key")
+        || message.includes("bookings.idempotency_key");
+      if (isSqliteConstraint && isIdempotencyConstraint) {
+        const existingOnConflict = await data.getBookingByIdempotencyKey(input.businessId, idempotencyKey);
+        if (existingOnConflict?.status === "confirmed") {
+          return {
+            status: 200,
+            body: { ok: true, status: "confirmed", bookingId: existingOnConflict.id },
+          };
+        }
+        if (existingOnConflict?.status === "pending") {
+          return {
+            status: 202,
+            body: { ok: true, status: "pending", bookingId: existingOnConflict.id },
+          };
+        }
+      }
+
+      if (isSqliteConstraint || message.includes("UNIQUE")) {
         return { status: 409, body: { ok: false, error: "SLOT_ALREADY_BOOKED" } };
       }
       return { status: 500, body: { ok: false, error: "Internal error" } };
@@ -300,7 +353,8 @@ export async function createBookingFlow({
           calendarId: "primary",
           requestBody: {
             summary: `${isEmergency ? "🚨 " : ""}${input.service || "HVAC"} - ${input.customer?.name || "Customer"}`,
-            description: buildCalendarDescription({ bookingId, customer: input.customer, notes: input.notes }),
+            description: `${buildCalendarDescription({ bookingId, customer: input.customer, notes: input.notes })}\nIdempotency-Key: ${idempotencyKey}`,
+            extendedProperties: { private: { idempotencyKey } },
             start: {
               dateTime: schedule.startUtcIso,
               timeZone: input.timezone,
