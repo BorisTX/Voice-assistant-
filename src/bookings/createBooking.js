@@ -150,6 +150,51 @@ function buildCalendarDescription({ bookingId, customer, notes }) {
   ].filter(Boolean).join("\n");
 }
 
+function validateFoundEventMatchesSchedule({ event, idempotencyKey, schedule }) {
+  const foundKey = event?.extendedProperties?.private?.idempotencyKey;
+  if (foundKey !== idempotencyKey) {
+    return { ok: false, reason: "idempotency-key-mismatch" };
+  }
+
+  const eventStartDateTime = event?.start?.dateTime;
+  const eventEndDateTime = event?.end?.dateTime;
+  const eventStartDate = event?.start?.date;
+  const eventEndDate = event?.end?.date;
+
+  const expectedStartUtc = DateTime.fromISO(schedule.startUtcIso, { zone: "utc" });
+  const expectedEndUtc = DateTime.fromISO(schedule.endUtcIso, { zone: "utc" });
+  if (!expectedStartUtc.isValid || !expectedEndUtc.isValid) {
+    return { ok: false, reason: "expected-schedule-invalid" };
+  }
+
+  if (eventStartDateTime || eventEndDateTime) {
+    const foundStartUtc = DateTime.fromISO(eventStartDateTime || "", { setZone: true }).toUTC();
+    const foundEndUtc = DateTime.fromISO(eventEndDateTime || "", { setZone: true }).toUTC();
+    if (!foundStartUtc.isValid || !foundEndUtc.isValid) {
+      return { ok: false, reason: "found-event-datetime-invalid" };
+    }
+
+    const startDiffMinutes = Math.abs(foundStartUtc.diff(expectedStartUtc, "minutes").minutes);
+    const endDiffMinutes = Math.abs(foundEndUtc.diff(expectedEndUtc, "minutes").minutes);
+    if (startDiffMinutes > 2 || endDiffMinutes > 2) {
+      return { ok: false, reason: "datetime-outside-tolerance" };
+    }
+
+    return { ok: true };
+  }
+
+  if (eventStartDate || eventEndDate) {
+    const expectedStartDate = expectedStartUtc.toISODate();
+    const expectedEndDate = expectedEndUtc.toISODate();
+    if (eventStartDate !== expectedStartDate || eventEndDate !== expectedEndDate) {
+      return { ok: false, reason: "all-day-date-mismatch" };
+    }
+    return { ok: true };
+  }
+
+  return { ok: false, reason: "found-event-missing-start-end" };
+}
+
 export async function createBookingFlow({
   data,
   body,
@@ -403,8 +448,12 @@ export async function createBookingFlow({
           ...details,
         }));
 
-        const startMinusOneDayIso = DateTime.fromISO(schedule.startUtcIso, { zone: "utc" }).minus({ days: 1 }).toISO();
-        const endPlusOneDayIso = DateTime.fromISO(schedule.endUtcIso, { zone: "utc" }).plus({ days: 1 }).toISO();
+        const startUtc = DateTime.fromISO(schedule.startUtcIso, { zone: "utc" });
+        const endUtc = DateTime.fromISO(schedule.endUtcIso, { zone: "utc" });
+        const durationMinutes = Math.ceil(endUtc.diff(startUtc, "minutes").minutes);
+        const padMinutes = Math.max(60, Math.min(24 * 60, durationMinutes + 60));
+        const timeMinIso = startUtc.minus({ minutes: padMinutes }).toISO();
+        const timeMaxIso = endUtc.plus({ minutes: padMinutes }).toISO();
 
         let existingEvent = null;
         try {
@@ -412,8 +461,8 @@ export async function createBookingFlow({
             () => withTimeout(
               calendar.events.list({
                 calendarId: "primary",
-                timeMin: startMinusOneDayIso,
-                timeMax: endPlusOneDayIso,
+                timeMin: timeMinIso,
+                timeMax: timeMaxIso,
                 singleEvents: true,
                 privateExtendedProperty: `idempotencyKey=${idempotencyKey}`,
               }),
@@ -432,6 +481,30 @@ export async function createBookingFlow({
           );
           existingEvent = existingEventSearch?.data?.items?.[0] || null;
         } catch {}
+
+        if (existingEvent?.id) {
+          const matchValidation = validateFoundEventMatchesSchedule({
+            event: existingEvent,
+            idempotencyKey,
+            schedule,
+          });
+          if (!matchValidation.ok) {
+            console.warn(JSON.stringify({
+              level: "warn",
+              type: "idempotency-mismatch",
+              requestId,
+              bookingId,
+              idempotencyKey,
+              foundEventId: existingEvent.id,
+              foundStart: existingEvent?.start?.dateTime || existingEvent?.start?.date || null,
+              foundEnd: existingEvent?.end?.dateTime || existingEvent?.end?.date || null,
+              expectedStart: schedule.startUtcIso,
+              expectedEnd: schedule.endUtcIso,
+              reason: matchValidation.reason,
+            }));
+            existingEvent = null;
+          }
+        }
 
         if (existingEvent?.id) {
           console.log(JSON.stringify({
