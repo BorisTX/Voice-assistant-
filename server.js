@@ -1009,9 +1009,16 @@ async function shutdown(signal) {
     }
 
     const serverClosed = new Promise((resolve) => {
-      if (!server || typeof server.close !== "function") return resolve();
-      server.close(() => resolve());
+      try {
+        if (!server || typeof server.close !== "function") return resolve();
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
     });
+
+    await serverClosed;
+    console.log("HTTP server closed (no longer accepting new connections)");
 
     if (wss && typeof wss.close === "function") {
       try {
@@ -1030,9 +1037,6 @@ async function shutdown(signal) {
         try { client.terminate(); } catch {}
       }
     }, SHUTDOWN_POLL_MS * 2);
-
-    await serverClosed;
-    console.log("HTTP server closed (no longer accepting new connections)");
 
     setTimeout(() => {
       console.log("destroying sockets");
