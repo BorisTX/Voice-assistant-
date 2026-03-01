@@ -35,6 +35,46 @@ app.set("trust proxy", 1);
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+let isReady = false;
+let isShuttingDown = false;
+let activeRequests = 0;
+
+app.use((req, res, next) => {
+  let decremented = false;
+  activeRequests += 1;
+
+  const decrement = () => {
+    if (decremented) return;
+    decremented = true;
+    activeRequests = Math.max(0, activeRequests - 1);
+  };
+
+  res.on("finish", decrement);
+  res.on("close", decrement);
+
+  return next();
+});
+
+app.use((req, res, next) => {
+  const isHealthPath = req.path === "/healthz" || req.path === "/readyz";
+  if (isShuttingDown && !isHealthPath) {
+    return res.status(503).json({ ok: false, error: "SERVER_SHUTTING_DOWN" });
+  }
+  return next();
+});
+
+app.get("/healthz", (req, res) => {
+  res.status(200).json({ ok: true });
+});
+
+app.get("/readyz", (req, res) => {
+  const ready = isReady && !isShuttingDown && server?.listening;
+  if (!ready) {
+    return res.status(503).json({ ok: false });
+  }
+  return res.status(200).json({ ok: true });
+});
+
 app.use((req, res, next) => {
   console.log("INCOMING:", req.method, req.url);
   next();
@@ -897,9 +937,84 @@ wss.on("connection", (twilioWs) => {
 // Startup
 // --------------------
 const PORT = process.env.PORT || 10000;
+const SHUTDOWN_TIMEOUT_MS = 15_000;
+const SHUTDOWN_POLL_MS = 250;
 
 let db;    // raw connection
 let data;  // data layer
+
+function closeDbGracefully() {
+  if (!db || typeof db.close !== "function") return Promise.resolve();
+
+  return new Promise((resolve) => {
+    db.close((err) => {
+      if (err) {
+        console.error("DB close failed:", err);
+      } else {
+        console.log("DB closed");
+      }
+      resolve();
+    });
+  });
+}
+
+function waitForActiveRequestsToDrain() {
+  return new Promise((resolve) => {
+    if (activeRequests === 0) return resolve();
+
+    const interval = setInterval(() => {
+      console.log(`Waiting for in-flight requests to finish: ${activeRequests}`);
+      if (activeRequests === 0) {
+        clearInterval(interval);
+        resolve();
+      }
+    }, SHUTDOWN_POLL_MS);
+  });
+}
+
+async function shutdown(signal) {
+  if (isShuttingDown) {
+    console.log(`Shutdown already in progress, ignoring ${signal}`);
+    return;
+  }
+
+  isShuttingDown = true;
+  isReady = false;
+  console.log(`Received ${signal}. Starting graceful shutdown...`);
+
+  const forceExitTimer = setTimeout(() => {
+    console.error(`Graceful shutdown timed out after ${SHUTDOWN_TIMEOUT_MS}ms. Forcing exit.`);
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+
+  try {
+    await new Promise((resolve) => {
+      server.close(() => {
+        console.log("HTTP server closed (no longer accepting new connections)");
+        resolve();
+      });
+    });
+
+    await waitForActiveRequestsToDrain();
+    await closeDbGracefully();
+
+    clearTimeout(forceExitTimer);
+    console.log("Graceful shutdown complete.");
+    process.exit(0);
+  } catch (err) {
+    clearTimeout(forceExitTimer);
+    console.error("Shutdown failed:", err);
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => {
+  shutdown("SIGTERM");
+});
+
+process.on("SIGINT", () => {
+  shutdown("SIGINT");
+});
 
 async function start() {
   console.log("Starting server...");
@@ -939,6 +1054,7 @@ async function start() {
   }
 
   server.listen(PORT, () => {
+    isReady = true;
     console.log("Voice assistant is running 🚀 on port", PORT);
   });
 }
