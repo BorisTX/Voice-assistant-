@@ -1022,9 +1022,11 @@ async function shutdown(signal) {
 
     if (wss && typeof wss.close === "function") {
       try {
-        await new Promise((res) => wss.close(() => res()));
-      } catch (e) {
-        console.error("wss.close failed", e);
+        await new Promise((res) => {
+          wss.close(() => res());
+        });
+      } catch (err) {
+        console.error("wss.close failed", err);
       }
     }
 
