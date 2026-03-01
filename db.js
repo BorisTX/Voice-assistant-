@@ -509,6 +509,22 @@ export async function findOverlappingActiveBookings(db, businessId, startUtcIso,
   );
 }
 
+export async function getBookingByIdempotencyKey(db, businessId, idempotencyKey) {
+  return get(
+    db,
+    `
+    SELECT *
+    FROM bookings
+    WHERE business_id = ?
+      AND idempotency_key = ?
+      AND status IN ('pending','confirmed')
+    ORDER BY created_at_utc DESC
+    LIMIT 1
+    `,
+    [businessId, idempotencyKey]
+  );
+}
+
 export async function createPendingHold(db, payload) {
   const now = new Date().toISOString();
   const {
@@ -526,6 +542,7 @@ export async function createPendingHold(db, payload) {
     service_type = null,
     timezone = "UTC",
     slot_key,
+    idempotency_key = null,
     job_summary = null,
     is_emergency = 0,
   } = payload;
@@ -547,11 +564,12 @@ export async function createPendingHold(db, payload) {
       service_address, service_type,
       timezone,
       slot_key,
+      idempotency_key,
       job_summary,
       is_emergency,
       gcal_event_id,
       created_at_utc, updated_at_utc
-    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       id,
@@ -568,6 +586,7 @@ export async function createPendingHold(db, payload) {
       service_type,
       timezone,
       slot_key,
+      idempotency_key,
       job_summary,
       is_emergency,
       null,

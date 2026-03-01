@@ -11,6 +11,9 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
   const nowInChicago = DateTime.fromISO("2026-01-01T09:00:00", { zone: "America/Chicago" });
   const calls = {
     createPendingBookingLock: 0,
+    getBookingByIdempotencyKey: 0,
+    googleInsert: 0,
+    lastGoogleInsertRequestBody: null,
     beginImmediateTransaction: 0,
     commitTransaction: 0,
     rollbackTransaction: 0,
@@ -37,6 +40,10 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
       lead_time_min: 60,
       max_days_ahead: 14,
     }),
+    getBookingByIdempotencyKey: async () => {
+      calls.getBookingByIdempotencyKey += 1;
+      return null;
+    },
     beginImmediateTransaction: async () => {
       calls.beginImmediateTransaction += 1;
       return true;
@@ -73,7 +80,11 @@ function makeFlowDeps({ sendSmsOk = true, bodyOverrides = {}, emergencyResult = 
         query: async () => ({ data: { calendars: { primary: { busy: [] } } } }),
       },
       events: {
-        insert: async () => ({ data: { id: "gcal-123" } }),
+        insert: async ({ requestBody }) => {
+          calls.googleInsert += 1;
+          calls.lastGoogleInsertRequestBody = requestBody;
+          return { data: { id: "gcal-123" } };
+        },
       },
     }),
   };
@@ -225,6 +236,58 @@ test("returns 409 when slot unique constraint is hit", async () => {
 
   assert.equal(result.status, 409);
   assert.equal(result.body.error, "SLOT_ALREADY_BOOKED");
+});
+
+test("returns existing confirmed booking on retry without creating new event", async () => {
+  const { calls, deps } = makeFlowDeps();
+  const existingBooking = { id: "booking-existing", status: "confirmed" };
+  let lookupCount = 0;
+
+  deps.data.getBookingByIdempotencyKey = async () => {
+    calls.getBookingByIdempotencyKey += 1;
+    lookupCount += 1;
+    if (lookupCount === 1) return null;
+    return existingBooking;
+  };
+
+  const first = await createBookingFlow(deps);
+  const second = await createBookingFlow(deps);
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(second.body.status, "confirmed");
+  assert.equal(second.body.bookingId, existingBooking.id);
+  assert.equal(calls.createPendingBookingLock, 1);
+  assert.equal(calls.googleInsert, 1);
+});
+
+test("unique idempotency constraint race returns existing pending/confirmed", async () => {
+  const { calls, deps } = makeFlowDeps();
+  const existingPending = { id: "booking-race", status: "pending" };
+  let lookupCount = 0;
+
+  deps.data.getBookingByIdempotencyKey = async () => {
+    calls.getBookingByIdempotencyKey += 1;
+    lookupCount += 1;
+    if (lookupCount === 1) return null;
+    return existingPending;
+  };
+
+  deps.data.createPendingBookingLock = async () => {
+    calls.createPendingBookingLock += 1;
+    const err = new Error("UNIQUE constraint failed: bookings.idempotency_key");
+    err.code = "SQLITE_CONSTRAINT";
+    throw err;
+  };
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 202);
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.status, "pending");
+  assert.equal(result.body.bookingId, existingPending.id);
+  assert.equal(calls.createPendingBookingLock, 1);
+  assert.equal(calls.googleInsert, 0);
 });
 
 test("returns 409 and rolls back when freebusy is already busy", async () => {
@@ -390,4 +453,15 @@ test("marks booking as failed when Google events.insert fails", async () => {
   assert.equal(result.status, 500);
   assert.equal(calls.failBooking, 1);
   assert.equal(calls.confirmBooking, 0);
+});
+
+test("adds idempotency key to Google event description and extendedProperties", async () => {
+  const { calls, deps } = makeFlowDeps();
+
+  const result = await createBookingFlow(deps);
+
+  assert.equal(result.status, 200);
+  assert.equal(calls.googleInsert, 1);
+  assert.ok(calls.lastGoogleInsertRequestBody.description.includes("Idempotency-Key:"));
+  assert.ok(calls.lastGoogleInsertRequestBody.extendedProperties.private.idempotencyKey);
 });

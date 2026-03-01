@@ -21,6 +21,7 @@ import {
   // bookings
   cleanupExpiredHolds,
   findOverlappingActiveBookings,
+  getBookingByIdempotencyKey,
   createPendingHold,
   createPendingHoldIfAvailableTx,
   createPendingBookingLock,
@@ -72,6 +73,8 @@ export function makeSqliteData(db) {
     cleanupExpiredHolds: (businessId) => cleanupExpiredHolds(db, businessId),
     findOverlappingActiveBookings: (businessId, startUtcIso, endUtcIso) =>
       findOverlappingActiveBookings(db, businessId, startUtcIso, endUtcIso),
+    getBookingByIdempotencyKey: (businessId, idempotencyKey) =>
+      getBookingByIdempotencyKey(db, businessId, idempotencyKey),
     createPendingHold: (payload) => createPendingHold(db, payload),
     createPendingHoldIfAvailableTx: (payload) => createPendingHoldIfAvailableTx(db, payload),
     createPendingBookingLock: (payload) => createPendingBookingLock(db, payload),
