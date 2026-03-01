@@ -513,6 +513,35 @@ export async function getBookingById(db, bookingId) {
     [bookingId]
   );
 }
+
+export async function logSmsAttempt(
+  db,
+  { businessId, bookingId = null, phone, message = null, status, errorMessage = null }
+) {
+  if (!businessId) throw new Error("logSmsAttempt: missing businessId");
+  if (typeof phone !== "string") throw new Error("logSmsAttempt: missing phone");
+  if (!status) throw new Error("logSmsAttempt: missing status");
+
+  const now = new Date().toISOString();
+
+  await run(
+    db,
+    `
+    INSERT INTO sms_logs (
+      business_id,
+      booking_id,
+      phone,
+      message,
+      status,
+      error_message,
+      created_at_utc
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `,
+    [businessId, bookingId, phone, message, status, errorMessage, now]
+  );
+
+  return true;
+}
 // --- oauth flows (PKCE) ---
 
 export async function createOAuthFlow(db, { nonce, business_id, code_verifier, expires_at_utc }) {
