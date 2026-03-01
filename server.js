@@ -243,6 +243,11 @@ function buildBusinessProfilePatch(body) {
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
 
+app.use("/debug", (req, res, next) => {
+  if (process.env.DEBUG_ROUTES === "1") return next();
+  return res.status(404).send("Not Found");
+});
+
 // --------------------
 // Debug: DB inspection
 // --------------------
