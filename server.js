@@ -59,6 +59,21 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    if (res.statusCode >= 400) {
+      const requestId = req.requestId || res.locals.requestId || null;
+      if (body && typeof body === "object" && !Array.isArray(body)) {
+        return originalJson({ ...body, requestId });
+      }
+      return originalJson({ ok: false, error: body, requestId });
+    }
+    return originalJson(body);
+  };
+  next();
+});
+
 let isReady = false;
 let isShuttingDown = false;
 let activeRequests = 0;
@@ -100,7 +115,10 @@ app.get("/readyz", (req, res) => {
 });
 
 app.use((req, res, next) => {
-  console.log("INCOMING:", req.method, req.url);
+  const isHealthPath = req.path === "/healthz" || req.path === "/readyz";
+  if (!isHealthPath) {
+    console.log("INCOMING:", req.method, req.url);
+  }
   next();
 });
 
@@ -752,7 +770,7 @@ app.get("/api/available-slots", async (req, res) => {
 });
 
 app.post("/api/bookings", async (req, res) => {
-  const requestId = req.requestId || req.get("x-request-id") || req.get("x-correlation-id") || null;
+  const requestId = req.requestId;
 
   try {
     const result = await createBookingFlow({
@@ -766,7 +784,7 @@ app.post("/api/bookings", async (req, res) => {
       requestId,
     });
 
-    const responseBody = result.status >= 500
+    const responseBody = result.status >= 400
       ? { ...result.body, requestId }
       : result.body;
     return res.status(result.status).json(responseBody);
@@ -786,9 +804,9 @@ app.post("/api/book", async (req, res) => {
   const t0 = nowMs();
   const route = "/api/book";
   const businessId = req.body?.businessId ?? req.body?.business_id ?? null;
+  const requestId = req.requestId;
 
   try {
-    const requestId = req.requestId || req.get("x-request-id") || req.get("x-correlation-id") || null;
     const result = await createBookingFlow({
       data,
       body: req.body || {},
@@ -804,13 +822,12 @@ app.post("/api/book", async (req, res) => {
     const status_code = result.status;
     const bookingId = result.body?.bookingId || null;
     console.log(JSON.stringify({ level: "info", route, requestId, status_code, duration_ms, businessId, bookingId }));
-    const responseBody = result.status >= 500
+    const responseBody = result.status >= 400
       ? { ...result.body, requestId }
       : result.body;
     return res.status(result.status).json(responseBody);
   } catch (error) {
     const duration_ms = Math.round(nowMs() - t0);
-    const requestId = req.requestId || req.get("x-request-id") || req.get("x-correlation-id") || null;
     console.error(JSON.stringify({
       level: "error",
       route,

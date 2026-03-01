@@ -769,3 +769,28 @@ test("freebusy retries once on 500 then succeeds", async () => {
   assert.equal(calls.googleFreebusy, 2);
   assert.equal(calls.googleInsert, 1);
 });
+
+test("error logs include requestId when provided", async () => {
+  const { deps } = makeFlowDeps();
+  const errors = [];
+  const originalError = console.error;
+
+  deps.sendBookingConfirmationFn = async () => {
+    throw new Error("sms boom");
+  };
+
+  console.error = (message) => {
+    errors.push(String(message));
+  };
+
+  try {
+    const result = await createBookingFlow(deps);
+    await flushAsync();
+
+    assert.equal(result.status, 200);
+    assert.ok(errors.some((line) => line.includes('"phase":"sms"')));
+    assert.ok(errors.some((line) => line.includes(`"requestId":"${deps.requestId}"`)));
+  } finally {
+    console.error = originalError;
+  }
+});
