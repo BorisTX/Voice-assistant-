@@ -579,7 +579,7 @@ test("when events.insert times out once but events.list finds event, confirms wi
   assert.equal(result.body.gcalEventId, "gcal-existing");
 });
 
-test("when events.list finds wrong event schedule, booking is not confirmed from lookup and warning is logged", async () => {
+test("when events.list finds wrong event schedule/key, booking is not confirmed from lookup and warning is logged", async () => {
   const { calls, deps } = makeFlowDeps();
   const warnings = [];
   const originalWarn = console.warn;
@@ -590,8 +590,9 @@ test("when events.list finds wrong event schedule, booking is not confirmed from
         query: async () => ({ data: { calendars: { primary: { busy: [] } } } }),
       },
       events: {
-        insert: async () => {
+        insert: async ({ requestBody }) => {
           calls.googleInsert += 1;
+          calls.lastGoogleInsertRequestBody = requestBody;
           const err = new Error("timed out");
           err.response = { status: 500 };
           throw err;
@@ -604,7 +605,11 @@ test("when events.list finds wrong event schedule, booking is not confirmed from
                 id: "gcal-wrong",
                 start: { dateTime: "2026-01-04T15:00:00.000Z" },
                 end: { dateTime: "2026-01-04T16:00:00.000Z" },
-                extendedProperties: { private: { idempotencyKey: "wrong-key" } },
+                extendedProperties: {
+                  private: {
+                    idempotencyKey: calls.lastGoogleInsertRequestBody.extendedProperties.private.idempotencyKey,
+                  },
+                },
               }],
             },
           };
@@ -623,6 +628,7 @@ test("when events.list finds wrong event schedule, booking is not confirmed from
     assert.equal(calls.googleInsert, 2);
     assert.equal(calls.confirmBooking, 0);
     assert.ok(warnings.some((line) => line.includes('"type":"idempotency-mismatch"')));
+    assert.ok(warnings.some((line) => line.includes('"reason":"datetime-outside-tolerance"')));
   } finally {
     console.warn = originalWarn;
   }
