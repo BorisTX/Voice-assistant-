@@ -183,6 +183,8 @@ export const DEFAULT_BUSINESS_PROFILE = {
   working_hours: DEFAULT_WORKING_HOURS,
   slot_duration_min: 60,
   buffer_min: 15,
+  lead_time_min: 60,
+  max_days_ahead: 14,
   emergency_enabled: 1,
   emergency_phone: null,
   service_area: DEFAULT_SERVICE_AREA,
@@ -211,6 +213,7 @@ export async function getBusinessProfile(db, businessId) {
   const row = await get(
     db,
     `SELECT business_id, timezone, working_hours_json, slot_duration_min, buffer_min,
+            lead_time_min, max_days_ahead,
             emergency_enabled, emergency_phone, service_area_json,
             created_at_utc, updated_at_utc
      FROM business_profiles
@@ -234,6 +237,8 @@ export async function upsertBusinessProfile(db, businessId, patch = {}) {
       working_hours_json,
       slot_duration_min,
       buffer_min,
+      lead_time_min,
+      max_days_ahead,
       emergency_enabled,
       emergency_phone,
       service_area_json,
@@ -246,6 +251,8 @@ export async function upsertBusinessProfile(db, businessId, patch = {}) {
       working_hours_json = COALESCE(excluded.working_hours_json, business_profiles.working_hours_json),
       slot_duration_min = COALESCE(excluded.slot_duration_min, business_profiles.slot_duration_min),
       buffer_min = COALESCE(excluded.buffer_min, business_profiles.buffer_min),
+      lead_time_min = COALESCE(excluded.lead_time_min, business_profiles.lead_time_min),
+      max_days_ahead = COALESCE(excluded.max_days_ahead, business_profiles.max_days_ahead),
       emergency_enabled = COALESCE(excluded.emergency_enabled, business_profiles.emergency_enabled),
       emergency_phone = CASE
         WHEN excluded.emergency_phone IS NULL AND ? = 0 THEN business_profiles.emergency_phone
@@ -259,6 +266,8 @@ export async function upsertBusinessProfile(db, businessId, patch = {}) {
       patch.working_hours_json ?? null,
       patch.slot_duration_min ?? null,
       patch.buffer_min ?? null,
+      patch.lead_time_min ?? null,
+      patch.max_days_ahead ?? null,
       patch.emergency_enabled ?? null,
       patch.emergency_phone ?? null,
       patch.service_area_json ?? null,
@@ -281,6 +290,8 @@ export async function getEffectiveBusinessProfile(db, businessId) {
     working_hours: row?.working_hours || DEFAULT_BUSINESS_PROFILE.working_hours,
     slot_duration_min: Number(row?.slot_duration_min || DEFAULT_BUSINESS_PROFILE.slot_duration_min),
     buffer_min: Number(row?.buffer_min ?? DEFAULT_BUSINESS_PROFILE.buffer_min),
+    lead_time_min: Number(row?.lead_time_min ?? DEFAULT_BUSINESS_PROFILE.lead_time_min),
+    max_days_ahead: Number(row?.max_days_ahead ?? DEFAULT_BUSINESS_PROFILE.max_days_ahead),
     emergency_enabled: Number(row?.emergency_enabled ?? DEFAULT_BUSINESS_PROFILE.emergency_enabled) ? 1 : 0,
     emergency_phone: row?.emergency_phone ?? DEFAULT_BUSINESS_PROFILE.emergency_phone,
     service_area: row?.service_area || DEFAULT_BUSINESS_PROFILE.service_area,

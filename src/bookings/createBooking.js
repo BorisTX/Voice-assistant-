@@ -79,6 +79,55 @@ function validateAndBuildSchedule({ input, business, businessProfile }) {
   };
 }
 
+function validateBookingTimeWindow({ input, business, businessProfile, nowDt }) {
+  const timezone = businessProfile?.timezone || business?.timezone || input.timezone || "America/Chicago";
+  const leadTimeMin = Math.max(
+    0,
+    Number(
+      businessProfile?.lead_time_min ?? business?.lead_time_min ?? 60
+    ) || 0
+  );
+  const maxDaysAhead = Math.max(
+    0,
+    Number(
+      businessProfile?.max_days_ahead ?? business?.max_days_ahead ?? 14
+    ) || 0
+  );
+
+  const requestedStartBusiness = DateTime.fromISO(input.startLocal, { zone: timezone });
+  if (!requestedStartBusiness.isValid) {
+    return { ok: true, details: [] };
+  }
+
+  const nowBusiness = nowDt.setZone(timezone);
+  const earliestAllowed = nowBusiness.plus({ minutes: leadTimeMin });
+  const latestAllowed = nowBusiness.plus({ days: maxDaysAhead }).endOf("day");
+  const details = [];
+
+  if (requestedStartBusiness < earliestAllowed) {
+    details.push({
+      reason: "START_TOO_SOON",
+      policyTimezone: timezone,
+      requestedStartLocal: requestedStartBusiness.toISO(),
+      earliestAllowedLocal: earliestAllowed.toISO(),
+      leadTimeMin,
+    });
+  }
+
+  if (requestedStartBusiness > latestAllowed) {
+    details.push({
+      reason: "START_TOO_FAR",
+      policyTimezone: timezone,
+      requestedStartLocal: requestedStartBusiness.toISO(),
+      latestAllowedLocal: latestAllowed.toISO(),
+      maxDaysAhead,
+      latestAllowedRule: "end_of_day_in_business_timezone",
+    });
+  }
+
+  return { ok: details.length === 0, details };
+}
+
 function buildCalendarDescription({ bookingId, customer, notes }) {
   return [
     bookingId ? `bookingId: ${bookingId}` : null,
@@ -98,6 +147,7 @@ export async function createBookingFlow({
   google,
   googleApiTimeoutMs,
   withTimeout,
+  nowFn = () => DateTime.now(),
   sendBookingConfirmationFn = sendBookingConfirmation,
   handleEmergencyFn = handleEmergency,
 }) {
@@ -123,6 +173,23 @@ export async function createBookingFlow({
     const schedule = validateAndBuildSchedule({ input, business: business || {}, businessProfile });
     if (!schedule.ok) {
       return { status: 400, body: { ok: false, error: schedule.errors.join("; ") } };
+    }
+
+    const windowValidation = validateBookingTimeWindow({
+      input,
+      business: business || {},
+      businessProfile,
+      nowDt: nowFn(),
+    });
+    if (!windowValidation.ok) {
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          error: "INVALID_BOOKING_TIME_WINDOW",
+          details: windowValidation.details,
+        },
+      };
     }
 
     const isEmergencyService = (input.service || "").toLowerCase() === "emergency";
