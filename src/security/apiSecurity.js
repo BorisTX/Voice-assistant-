@@ -3,7 +3,12 @@ import crypto from "node:crypto";
 const warnedMissingApiKey = { value: false };
 
 function getClientIp(req) {
-  return req.ip || "unknown";
+  if (req.ip) return req.ip;
+  const forwardedFor = req.headers?.["x-forwarded-for"];
+  if (forwardedFor) {
+    return String(forwardedFor).split(",")[0].trim();
+  }
+  return "unknown";
 }
 
 function getBearerToken(value) {
@@ -91,6 +96,7 @@ export function createApiSecurityMiddleware() {
 
   return function apiSecurityMiddleware(req, res, next) {
     const clientIp = getClientIp(req);
+    const businessId = getBusinessIdForRateLimit(req);
     const configuredApiKey = String(process.env.API_KEY || "").trim();
     const requestApiKey = getRequestKey(req, "x-api-key");
     const routeLimit = getRouteLimit(req.path);
@@ -111,14 +117,20 @@ export function createApiSecurityMiddleware() {
       const bruteForceResult = limiter.hit(`auth-fail:${clientIp}`, 30);
       setRateLimitHeaders(res, bruteForceResult.limit, bruteForceResult.remaining);
       if (!bruteForceResult.allowed) {
-        console.warn("auth_bruteforce_rate_limited", { ip: clientIp });
+        console.warn("auth_bruteforce_rate_limited", {
+          event: "auth_bruteforce_rate_limited",
+          ip: clientIp,
+          ...(businessId ? { businessId } : {}),
+          path: req.path,
+        });
+        res.setHeader("Retry-After", "60");
+        return res.status(429).json({ ok: false, error: "RATE_LIMITED" });
       }
       return res.status(401).json({ ok: false, error: "UNAUTHORIZED" });
     }
 
     let finalResult;
     let allowed = true;
-    const businessId = getBusinessIdForRateLimit(req);
 
     if (req.path === "/available-slots") {
       finalResult = limiter.hit(`api-slots:${clientIp}`, 60);
