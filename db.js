@@ -204,6 +204,12 @@ export const DEFAULT_BUSINESS_PROFILE = {
   max_days_ahead: 14,
   emergency_enabled: 1,
   emergency_phone: null,
+  after_hours_auto_sms_enabled: 1,
+  booking_link_base: null,
+  emergency_notify_sms_to: null,
+  emergency_notify_call_to: null,
+  emergency_retries: 2,
+  emergency_retry_delay_sec: 30,
   service_area: DEFAULT_SERVICE_AREA,
 };
 
@@ -231,7 +237,9 @@ export async function getBusinessProfile(db, businessId) {
     db,
     `SELECT business_id, timezone, working_hours_json, slot_duration_min, buffer_min,
             lead_time_min, max_days_ahead,
-            emergency_enabled, emergency_phone, service_area_json,
+            emergency_enabled, emergency_phone, after_hours_auto_sms_enabled, booking_link_base,
+            emergency_notify_sms_to, emergency_notify_call_to, emergency_retries, emergency_retry_delay_sec,
+            service_area_json,
             created_at_utc, updated_at_utc
      FROM business_profiles
      WHERE business_id = ?
@@ -258,11 +266,17 @@ export async function upsertBusinessProfile(db, businessId, patch = {}) {
       max_days_ahead,
       emergency_enabled,
       emergency_phone,
+      after_hours_auto_sms_enabled,
+      booking_link_base,
+      emergency_notify_sms_to,
+      emergency_notify_call_to,
+      emergency_retries,
+      emergency_retry_delay_sec,
       service_area_json,
       created_at_utc,
       updated_at_utc
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(business_id) DO UPDATE SET
       timezone = COALESCE(excluded.timezone, business_profiles.timezone),
       working_hours_json = COALESCE(excluded.working_hours_json, business_profiles.working_hours_json),
@@ -275,6 +289,12 @@ export async function upsertBusinessProfile(db, businessId, patch = {}) {
         WHEN excluded.emergency_phone IS NULL AND ? = 0 THEN business_profiles.emergency_phone
         ELSE excluded.emergency_phone
       END,
+      after_hours_auto_sms_enabled = COALESCE(excluded.after_hours_auto_sms_enabled, business_profiles.after_hours_auto_sms_enabled),
+      booking_link_base = COALESCE(excluded.booking_link_base, business_profiles.booking_link_base),
+      emergency_notify_sms_to = COALESCE(excluded.emergency_notify_sms_to, business_profiles.emergency_notify_sms_to),
+      emergency_notify_call_to = COALESCE(excluded.emergency_notify_call_to, business_profiles.emergency_notify_call_to),
+      emergency_retries = COALESCE(excluded.emergency_retries, business_profiles.emergency_retries),
+      emergency_retry_delay_sec = COALESCE(excluded.emergency_retry_delay_sec, business_profiles.emergency_retry_delay_sec),
       service_area_json = COALESCE(excluded.service_area_json, business_profiles.service_area_json),
       updated_at_utc = excluded.updated_at_utc`,
     [
@@ -287,6 +307,12 @@ export async function upsertBusinessProfile(db, businessId, patch = {}) {
       patch.max_days_ahead ?? null,
       patch.emergency_enabled ?? null,
       patch.emergency_phone ?? null,
+      patch.after_hours_auto_sms_enabled ?? null,
+      patch.booking_link_base ?? null,
+      patch.emergency_notify_sms_to ?? null,
+      patch.emergency_notify_call_to ?? null,
+      patch.emergency_retries ?? null,
+      patch.emergency_retry_delay_sec ?? null,
       patch.service_area_json ?? null,
       now,
       now,
@@ -311,6 +337,12 @@ export async function getEffectiveBusinessProfile(db, businessId) {
     max_days_ahead: Number(row?.max_days_ahead ?? DEFAULT_BUSINESS_PROFILE.max_days_ahead),
     emergency_enabled: Number(row?.emergency_enabled ?? DEFAULT_BUSINESS_PROFILE.emergency_enabled) ? 1 : 0,
     emergency_phone: row?.emergency_phone ?? DEFAULT_BUSINESS_PROFILE.emergency_phone,
+    after_hours_auto_sms_enabled: Number(row?.after_hours_auto_sms_enabled ?? DEFAULT_BUSINESS_PROFILE.after_hours_auto_sms_enabled) ? 1 : 0,
+    booking_link_base: row?.booking_link_base ?? DEFAULT_BUSINESS_PROFILE.booking_link_base,
+    emergency_notify_sms_to: row?.emergency_notify_sms_to ?? DEFAULT_BUSINESS_PROFILE.emergency_notify_sms_to,
+    emergency_notify_call_to: row?.emergency_notify_call_to ?? DEFAULT_BUSINESS_PROFILE.emergency_notify_call_to,
+    emergency_retries: Number(row?.emergency_retries ?? DEFAULT_BUSINESS_PROFILE.emergency_retries),
+    emergency_retry_delay_sec: Number(row?.emergency_retry_delay_sec ?? DEFAULT_BUSINESS_PROFILE.emergency_retry_delay_sec),
     service_area: row?.service_area || DEFAULT_BUSINESS_PROFILE.service_area,
     created_at_utc: row?.created_at_utc || null,
     updated_at_utc: row?.updated_at_utc || null,
@@ -821,8 +853,13 @@ export async function logSmsAttempt(
     messageBody = null,
     messageSid = null,
     type = "other",
+    kind = null,
+    reason = null,
+    requestId = null,
+    dedupeKey = null,
     status,
     errorMessage = null,
+    error = null,
   }
 ) {
   if (!businessId) throw new Error("logSmsAttempt: missing businessId");
@@ -842,10 +879,16 @@ export async function logSmsAttempt(
       message_body,
       message_sid,
       type,
+      kind,
+      reason,
+      request_id,
+      dedupe_key,
       status,
       error_message,
+      error,
+      twilio_sid,
       created_at_utc
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       businessId,
@@ -855,13 +898,25 @@ export async function logSmsAttempt(
       messageBody,
       messageSid,
       type,
+      kind,
+      reason,
+      requestId,
+      dedupeKey,
       status,
       errorMessage,
+      error,
+      messageSid,
       now,
     ]
   );
 
   return true;
+}
+
+export async function hasSmsLogByDedupeKey(db, dedupeKey) {
+  if (!dedupeKey) return false;
+  const row = await get(db, "SELECT 1 AS ok FROM sms_logs WHERE dedupe_key = ? LIMIT 1", [dedupeKey]);
+  return Boolean(row?.ok);
 }
 
 export async function logEmergencyAttempt(
@@ -1009,6 +1064,8 @@ export async function logCallEvent(
     durationSec = null,
     recordingUrl = null,
     metaJson = null,
+    requestId = null,
+    error = null,
   }
 ) {
   if (!businessId) throw new Error("logCallEvent: missing businessId");
@@ -1020,8 +1077,8 @@ export async function logCallEvent(
     `
     INSERT INTO call_logs (
       id, business_id, call_sid, from_number, to_number, direction, status,
-      duration_sec, recording_url, meta_json, created_at_utc
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      duration_sec, recording_url, meta_json, request_id, error, created_at_utc
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       crypto.randomUUID(),
@@ -1034,6 +1091,8 @@ export async function logCallEvent(
       durationSec,
       recordingUrl,
       metaJson,
+      requestId,
+      error,
       now,
     ]
   );

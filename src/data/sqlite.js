@@ -33,6 +33,7 @@ import {
   cancelBooking,
   updateBookingStatus,
   logSmsAttempt,
+  hasSmsLogByDedupeKey,
   logEmergencyAttempt,
   logCallEvent,
   enqueueRetry,
@@ -95,6 +96,7 @@ export function makeSqliteData(db) {
     listRecentSmsLogs: (limit = 50) => listRecentSmsLogs(db, limit),
     listRecentRetries: (opts = {}) => listRecentRetries(db, opts),
     logSmsAttempt: (payload) => logSmsAttempt(db, payload),
+    hasSmsLogByDedupeKey: (dedupeKey) => hasSmsLogByDedupeKey(db, dedupeKey),
     logEmergencyAttempt: (payload) => logEmergencyAttempt(db, payload),
   };
 }
