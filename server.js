@@ -415,22 +415,36 @@ function buildBusinessProfilePatch(body) {
 // Health check
 app.get("/", (req, res) => res.status(200).send("OK"));
 
+// Protect /debug in production via ADMIN_KEY
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/debug")) return next();
+
+  const isProd = process.env.NODE_ENV === "production";
+  if (!isProd) return next();
+
+  const expected = process.env.ADMIN_KEY;
+  if (!expected) {
+    const requestId = req.requestId || res.locals?.requestId || null;
+    return res.status(404).json({ ok: false, error: "Not Found", requestId });
+  }
+
+  const headerKey = req.get("x-admin-key");
+  const auth = req.get("authorization");
+  const bearer = (auth && auth.toLowerCase().startsWith("bearer ")) ? auth.slice(7).trim() : null;
+  const queryKey = req.query?.admin_key ? String(req.query.admin_key) : null;
+
+  const provided = headerKey || bearer || queryKey;
+  if (provided !== expected) {
+    const requestId = req.requestId || res.locals?.requestId || null;
+    return res.status(404).json({ ok: false, error: "Not Found", requestId });
+  }
+
+  return next();
+});
+
 app.use("/debug", (req, res, next) => {
   if (process.env.DEBUG_ROUTES !== "1") {
     return res.status(404).json({ ok: false, error: "Not Found" });
-  }
-
-  if (process.env.NODE_ENV === "production") {
-    const configuredDebugKey = String(process.env.DEBUG_ADMIN_KEY || "").trim();
-    const directDebugKey = String(req.header("x-debug-key") || "").trim();
-    const authHeader = String(req.header("authorization") || "");
-    const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
-    const bearerDebugKey = bearerMatch ? String(bearerMatch[1] || "").trim() : "";
-    const requestDebugKey = directDebugKey || bearerDebugKey;
-
-    if (!configuredDebugKey || requestDebugKey !== configuredDebugKey) {
-      return res.status(404).json({ ok: false, error: "Not Found" });
-    }
   }
 
   const json = res.json.bind(res);
