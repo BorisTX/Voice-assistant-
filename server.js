@@ -111,6 +111,66 @@ const GOOGLE_API_TIMEOUT_MS = (() => {
   return Number.isFinite(value) && value > 0 ? value : GOOGLE_API_TIMEOUT_MS_DEFAULT;
 })();
 
+function extractBusinessIdForRateLimit(req) {
+  const fromQuery = req.query?.business_id;
+  if (fromQuery != null && String(fromQuery).trim()) return String(fromQuery).trim();
+
+  const fromBody = req.body?.businessId ?? req.body?.business_id;
+  if (fromBody != null && String(fromBody).trim()) return String(fromBody).trim();
+
+  const fromParams = req.params?.businessId ?? req.params?.business_id;
+  if (fromParams != null && String(fromParams).trim()) return String(fromParams).trim();
+
+  return null;
+}
+
+function createInMemoryRateLimiter({ windowMs, max }) {
+  const buckets = new Map();
+
+  return (req, res, next) => {
+    const now = Date.now();
+    const businessId = extractBusinessIdForRateLimit(req);
+    const key = businessId ? `business:${businessId}` : `ip:${req.ip}`;
+
+    const existing = buckets.get(key);
+    if (!existing || existing.resetAt <= now) {
+      buckets.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    existing.count += 1;
+    if (existing.count <= max) {
+      return next();
+    }
+
+    const retryAfterSec = Math.max(1, Math.ceil((existing.resetAt - now) / 1000));
+    res.setHeader("Retry-After", String(retryAfterSec));
+    console.warn(JSON.stringify({
+      level: "warn",
+      type: "rate_limit",
+      requestId: req.requestId,
+      businessId,
+      key,
+      method: req.method,
+      path: req.path,
+      ip: req.ip,
+      limit: max,
+      windowMs,
+      retryAfterSec,
+    }));
+    return res.status(429).json({
+      ok: false,
+      error: "RATE_LIMITED",
+      retryAfterSec,
+      requestId: req.requestId,
+    });
+  };
+}
+
+const availableSlotsRateLimit = createInMemoryRateLimiter({ windowMs: 60_000, max: 30 });
+const bookRateLimit = createInMemoryRateLimiter({ windowMs: 60_000, max: 10 });
+const bookingsRateLimit = createInMemoryRateLimiter({ windowMs: 60_000, max: 30 });
+
 function withTimeout(promise, ms, label, requestId = null) {
   const t0 = nowMs();
   let timer;
@@ -683,7 +743,7 @@ app.put("/api/businesses/:businessId/profile", async (req, res) => {
 // --------------------
 // Slots API
 // --------------------
-app.get("/api/available-slots", async (req, res) => {
+app.get("/api/available-slots", availableSlotsRateLimit, async (req, res) => {
   const requestId = req.requestId;
   try {
     if (!data) return res.status(500).json({ ok: false, error: "Data layer not ready" });
@@ -791,7 +851,7 @@ app.get("/api/available-slots", async (req, res) => {
   }
 });
 
-app.post("/api/bookings", async (req, res) => {
+app.post("/api/bookings", bookingsRateLimit, async (req, res) => {
   const requestId = req.requestId;
 
   try {
@@ -819,7 +879,7 @@ app.post("/api/bookings", async (req, res) => {
   }
 });
 
-app.post("/api/book", async (req, res) => {
+app.post("/api/book", bookRateLimit, async (req, res) => {
   const t0 = nowMs();
   const route = "/api/book";
   const businessId = req.body?.businessId ?? req.body?.business_id ?? null;
