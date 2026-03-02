@@ -18,6 +18,7 @@ import { createBookingFlow } from "./src/bookings/createBooking.js";
 import { runRetriesOnce } from "./src/retries/runRetriesOnce.js";
 import { isOutsideBusinessHours } from "./src/emergency/businessHours.js";
 import { sendAutoSmsToCaller, sendEmergencyNotify } from "./src/sms/sendSms.js";
+import { verifyTwilioSignature } from "./src/twilio/verifyTwilioSignature.js";
 
 import {
   makeOAuthClient,
@@ -1016,7 +1017,8 @@ app.get("/voice", (req, res) => {
   res.status(200).send("VOICE OK (GET)");
 });
 
-app.post("/voice", async (req, res) => {
+// Manual test: use ngrok + Twilio Console webhook tester; invalid signature should return 403, valid signature should reach this handler.
+app.post("/voice", verifyTwilioSignature, async (req, res) => {
   console.log("POST /voice from Twilio");
 
   const businessId = String(req.body?.business_id || process.env.DEFAULT_BUSINESS_ID || "");
