@@ -6,28 +6,19 @@ import { decideVoiceCall } from './voiceCallDecision.js';
 test('completed status sends no sms by default', () => {
   const decision = decideVoiceCall({ callStatus: 'completed', businessId: 'biz_1' });
   assert.equal(decision.normalizedStatus, 'completed');
-  assert.equal(decision.sendMissedCallSms, false);
-  assert.equal(decision.sendUnavailableSms, false);
-  assert.equal(decision.unavailableReason, null);
-  assert.equal(decision.combined, false);
+  assert.deepEqual(decision.sms, { send: false, kind: null, reason: null });
 });
 
 test('failed-like statuses send missed call sms when business id is present', () => {
   const decision = decideVoiceCall({ callStatus: 'busy', businessId: 'biz_1' });
   assert.equal(decision.normalizedStatus, 'failed');
-  assert.equal(decision.sendMissedCallSms, true);
-  assert.equal(decision.sendUnavailableSms, false);
-  assert.equal(decision.unavailableReason, null);
-  assert.equal(decision.combined, false);
+  assert.deepEqual(decision.sms, { send: true, kind: 'MISSED_CALL', reason: 'failed_call' });
 });
 
 test('does not send missed call sms when business id is missing', () => {
   const decision = decideVoiceCall({ callStatus: 'failed', businessId: '' });
   assert.equal(decision.normalizedStatus, 'failed');
-  assert.equal(decision.sendMissedCallSms, false);
-  assert.equal(decision.sendUnavailableSms, false);
-  assert.equal(decision.unavailableReason, null);
-  assert.equal(decision.combined, false);
+  assert.deepEqual(decision.sms, { send: false, kind: null, reason: null });
 });
 
 test('not ready with auto sms enabled sends unavailable sms with reason', () => {
@@ -40,13 +31,10 @@ test('not ready with auto sms enabled sends unavailable sms with reason', () => 
     afterHoursAutoSmsEnabled: true,
   });
   assert.equal(decision.normalizedStatus, 'started');
-  assert.equal(decision.sendMissedCallSms, false);
-  assert.equal(decision.sendUnavailableSms, true);
-  assert.equal(decision.unavailableReason, 'not_ready');
-  assert.equal(decision.combined, false);
+  assert.deepEqual(decision.sms, { send: true, kind: 'UNAVAILABLE', reason: 'not_ready' });
 });
 
-test('after hours with auto sms enabled sets unavailableReason after_hours', () => {
+test('after hours with auto sms enabled sets unavailable reason after_hours', () => {
   const decision = decideVoiceCall({
     callStatus: 'started',
     businessId: 'biz_1',
@@ -56,13 +44,23 @@ test('after hours with auto sms enabled sets unavailableReason after_hours', () 
     afterHoursAutoSmsEnabled: true,
   });
   assert.equal(decision.normalizedStatus, 'started');
-  assert.equal(decision.sendMissedCallSms, false);
-  assert.equal(decision.sendUnavailableSms, true);
-  assert.equal(decision.unavailableReason, 'after_hours');
-  assert.equal(decision.combined, false);
+  assert.deepEqual(decision.sms, { send: true, kind: 'UNAVAILABLE', reason: 'after_hours' });
 });
 
-test('combined case sets combined true and both sms booleans true', () => {
+test('shutting down takes precedence over not ready and after hours', () => {
+  const decision = decideVoiceCall({
+    callStatus: 'started',
+    businessId: 'biz_1',
+    isReady: false,
+    isShuttingDown: true,
+    afterHours: true,
+    afterHoursAutoSmsEnabled: true,
+  });
+  assert.equal(decision.normalizedStatus, 'started');
+  assert.deepEqual(decision.sms, { send: true, kind: 'UNAVAILABLE', reason: 'shutting_down' });
+});
+
+test('combined case sets kind BOTH with canonical reason', () => {
   const decision = decideVoiceCall({
     callStatus: 'no-answer',
     businessId: 'biz_1',
@@ -72,10 +70,7 @@ test('combined case sets combined true and both sms booleans true', () => {
     afterHoursAutoSmsEnabled: true,
   });
   assert.equal(decision.normalizedStatus, 'failed');
-  assert.equal(decision.sendMissedCallSms, true);
-  assert.equal(decision.sendUnavailableSms, true);
-  assert.equal(decision.unavailableReason, 'not_ready');
-  assert.equal(decision.combined, true);
+  assert.deepEqual(decision.sms, { send: true, kind: 'BOTH', reason: 'failed_call_and_unavailable' });
 });
 
 test('does not send unavailable sms when auto sms disabled', () => {
@@ -88,8 +83,5 @@ test('does not send unavailable sms when auto sms disabled', () => {
     afterHoursAutoSmsEnabled: false,
   });
   assert.equal(decision.normalizedStatus, 'started');
-  assert.equal(decision.sendMissedCallSms, false);
-  assert.equal(decision.sendUnavailableSms, false);
-  assert.equal(decision.unavailableReason, null);
-  assert.equal(decision.combined, false);
+  assert.deepEqual(decision.sms, { send: false, kind: null, reason: null });
 });

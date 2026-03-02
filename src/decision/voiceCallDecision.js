@@ -19,17 +19,17 @@ export function decideVoiceCall(ctx) {
     : null;
   const combined = sendMissedCallSms && sendUnavailableSms;
 
-  let reason = "no_sms_conditions_met";
-  if (combined) reason = "failed_call_and_unavailable";
-  else if (sendMissedCallSms) reason = "failed_call";
-  else if (sendUnavailableSms) reason = unavailableReason;
+  let sms = { send: false, kind: null, reason: null };
+  if (combined) {
+    sms = { send: true, kind: "BOTH", reason: "failed_call_and_unavailable" };
+  } else if (sendMissedCallSms) {
+    sms = { send: true, kind: "MISSED_CALL", reason: "failed_call" };
+  } else if (sendUnavailableSms) {
+    sms = { send: true, kind: "UNAVAILABLE", reason: unavailableReason };
+  }
 
   return {
     normalizedStatus,
-    sendMissedCallSms,
-    sendUnavailableSms,
-    unavailableReason,
-    combined,
-    reason,
+    sms,
   };
 }

@@ -1081,12 +1081,12 @@ app.post("/voice", verifyTwilioSignature, async (req, res) => {
         requestId: req.requestId,
       });
 
-      if ((decision.sendMissedCallSms || decision.sendUnavailableSms) && businessId) {
+      if (decision.sms.send) {
         await sendAutoSmsToCaller({
           to: callerNumber,
           businessId,
           requestId: req.requestId,
-          reason: decision.combined ? "failed_call_and_unavailable" : decision.reason,
+          reason: decision.sms.reason,
           link: profile?.booking_link_base ?? null,
           data,
         });
