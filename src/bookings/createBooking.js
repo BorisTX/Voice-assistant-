@@ -325,7 +325,8 @@ export async function createBookingFlow({
           },
         }),
         googleOpTimeoutMs,
-        "google.freebusy"
+        "google.freebusy",
+        requestId
       ),
       {
         label: "google.freebusy",
@@ -430,7 +431,8 @@ export async function createBookingFlow({
         created = await withTimeout(
           calendar.events.insert(insertParams),
           googleOpTimeoutMs,
-          "google.events.insert"
+          "google.events.insert",
+          requestId
         );
         break;
       } catch (insertError) {
@@ -469,7 +471,8 @@ export async function createBookingFlow({
                 privateExtendedProperty: `idempotencyKey=${idempotencyKey}`,
               }),
               googleOpTimeoutMs,
-              "google.events.list.idempotency"
+              "google.events.list.idempotency",
+              requestId
             ),
             {
               label: "google.events.list.idempotency",

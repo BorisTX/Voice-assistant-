@@ -57,6 +57,9 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+
 app.use((req, res, next) => {
   const originalJson = res.json.bind(res);
 
@@ -66,11 +69,12 @@ app.use((req, res, next) => {
     if (res.statusCode >= 400) {
       if (body && typeof body === "object" && !Array.isArray(body)) {
         return originalJson({
-          ok: body.ok ?? false,
           ...body,
+          ok: typeof body.ok === "boolean" ? body.ok : false,
           requestId,
         });
       }
+
       return originalJson({
         ok: false,
         error: body,
@@ -83,9 +87,6 @@ app.use((req, res, next) => {
 
   next();
 });
-
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
 
 let isReady = false;
 let isShuttingDown = false;
@@ -121,13 +122,7 @@ app.get("/healthz", (req, res) => {
 
 app.get("/readyz", (req, res) => {
   const ready = isReady && !isShuttingDown && server && server.listening;
-
-  if (!ready) {
-    return res.status(503).json({
-      error: "NOT_READY"
-    });
-  }
-
+  if (!ready) return res.status(503).json({ error: "NOT_READY" });
   return res.status(200).json({ ok: true });
 });
 
@@ -142,7 +137,7 @@ const GOOGLE_API_TIMEOUT_MS = (() => {
   return Number.isFinite(value) && value > 0 ? value : GOOGLE_API_TIMEOUT_MS_DEFAULT;
 })();
 
-function withTimeout(promise, ms, label, requestId = null) {
+function withTimeout(promise, ms, label, requestId) {
   const t0 = nowMs();
   let timer;
   return Promise.race([
@@ -157,15 +152,25 @@ function withTimeout(promise, ms, label, requestId = null) {
   ])
     .then((result) => {
       const duration_ms = Math.round(nowMs() - t0);
-      console.log(JSON.stringify({ op: label, ok: true, duration_ms }));
+      console.log(JSON.stringify({
+        level: "info",
+        type: "google_api",
+        requestId,
+        op: label,
+        ok: true,
+        duration_ms,
+      }));
       return result;
     })
     .catch((error) => {
+      const duration_ms = Math.round(nowMs() - t0);
       console.error(JSON.stringify({
         level: "error",
         type: "google_api",
-        op: label,
         requestId,
+        op: label,
+        ok: false,
+        duration_ms,
         status_code: 500,
         error: String(error?.message || error),
       }));
@@ -808,7 +813,7 @@ app.get("/api/available-slots", async (req, res) => {
       status_code: 500,
       error: String(e?.message || e),
     }));
-    return res.status(500).json({ ok: false, error: "Internal error", requestId });
+    return res.status(500).json({ ok: false, error: "Internal error" });
   }
 });
 
@@ -827,10 +832,7 @@ app.post("/api/bookings", async (req, res) => {
       requestId,
     });
 
-    const responseBody = result.status >= 400
-      ? { ...result.body, requestId }
-      : result.body;
-    return res.status(result.status).json(responseBody);
+    return res.status(result.status).json(result.body);
   } catch (error) {
     console.error(JSON.stringify({
       level: "error",
@@ -839,7 +841,7 @@ app.post("/api/bookings", async (req, res) => {
       status_code: 500,
       error: String(error?.message || error),
     }));
-    return res.status(500).json({ ok: false, error: "Internal error", requestId });
+    return res.status(500).json({ ok: false, error: "Internal error" });
   }
 });
 
@@ -865,10 +867,7 @@ app.post("/api/book", async (req, res) => {
     const status_code = result.status;
     const bookingId = result.body?.bookingId || null;
     console.log(JSON.stringify({ level: "info", route, requestId, status_code, duration_ms, businessId, bookingId }));
-    const responseBody = result.status >= 400
-      ? { ...result.body, requestId }
-      : result.body;
-    return res.status(result.status).json(responseBody);
+    return res.status(result.status).json(result.body);
   } catch (error) {
     const duration_ms = Math.round(nowMs() - t0);
     console.error(JSON.stringify({
@@ -881,7 +880,7 @@ app.post("/api/book", async (req, res) => {
       bookingId: null,
       error: String(error?.message || error),
     }));
-    return res.status(500).json({ ok: false, error: "Internal error", requestId });
+    return res.status(500).json({ ok: false, error: "Internal error" });
   }
 });
 
@@ -943,7 +942,7 @@ app.post("/voice", async (req, res) => {
 
 app.use((req, res) => {
   console.log(JSON.stringify({ level: "info", type: "not_found", requestId: req.requestId, method: req.method, path: req.path }));
-  res.status(404).json({ error: "Not Found" });
+  return res.status(404).json({ error: "Not Found" });
 });
 
 app.use((err, req, res, next) => {
@@ -958,16 +957,14 @@ app.use((err, req, res, next) => {
   console.error(JSON.stringify({
     level: "error",
     type: "unhandled",
-    route: req.path,
-    method: req.method,
     requestId,
+    method: req.method,
+    path: req.path,
     status_code,
     error: String(err?.message || err),
   }));
 
-  return res.status(status_code).json({
-    error: "Internal error"
-  });
+  return res.status(status_code).json({ error: "Internal error" });
 });
 
 // --------------------
