@@ -60,34 +60,6 @@ app.use((req, res, next) => {
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-app.use((req, res, next) => {
-  const originalJson = res.json.bind(res);
-
-  res.json = (body) => {
-    const requestId = req.requestId || res.locals.requestId || null;
-
-    if (res.statusCode >= 400) {
-      if (body && typeof body === "object" && !Array.isArray(body)) {
-        return originalJson({
-          ...body,
-          ok: typeof body.ok === "boolean" ? body.ok : false,
-          requestId,
-        });
-      }
-
-      return originalJson({
-        ok: false,
-        error: body,
-        requestId,
-      });
-    }
-
-    return originalJson(body);
-  };
-
-  next();
-});
-
 let isReady = false;
 let isShuttingDown = false;
 let activeRequests = 0;
@@ -122,7 +94,9 @@ app.get("/healthz", (req, res) => {
 
 app.get("/readyz", (req, res) => {
   const ready = isReady && !isShuttingDown && server && server.listening;
-  if (!ready) return res.status(503).json({ error: "NOT_READY" });
+  if (!ready) {
+    return res.status(503).json({ ok: false, error: "NOT_READY", requestId: req.requestId });
+  }
   return res.status(200).json({ ok: true });
 });
 
@@ -137,7 +111,7 @@ const GOOGLE_API_TIMEOUT_MS = (() => {
   return Number.isFinite(value) && value > 0 ? value : GOOGLE_API_TIMEOUT_MS_DEFAULT;
 })();
 
-function withTimeout(promise, ms, label, requestId) {
+function withTimeout(promise, ms, label, requestId = null) {
   const t0 = nowMs();
   let timer;
   return Promise.race([
@@ -946,25 +920,23 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  if (res.headersSent) {
-    return next(err);
-  }
+  if (res.headersSent) return next(err);
 
   const requestId = req.requestId || res.locals.requestId || null;
-  const statusCandidate = err?.statusCode ?? err?.status;
-  const status_code = Number.isFinite(statusCandidate) ? statusCandidate : 500;
+  const candidate = err?.statusCode ?? err?.status;
+  const status_code = Number.isFinite(candidate) ? candidate : 500;
 
   console.error(JSON.stringify({
     level: "error",
     type: "unhandled",
-    requestId,
+    route: req.path,
     method: req.method,
-    path: req.path,
+    requestId,
     status_code,
     error: String(err?.message || err),
   }));
 
-  return res.status(status_code).json({ error: "Internal error" });
+  return res.status(status_code).json({ ok: false, error: "Internal error", requestId });
 });
 
 // --------------------
