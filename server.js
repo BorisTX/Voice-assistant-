@@ -83,7 +83,7 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   const isHealthPath = req.path === "/healthz" || req.path === "/readyz";
   if (isShuttingDown && !isHealthPath) {
-    return res.status(503).json({ ok: false, error: "SERVER_SHUTTING_DOWN" });
+    return res.status(503).json({ ok: false, error: "SERVER_SHUTTING_DOWN", requestId: req.requestId });
   }
   return next();
 });
@@ -916,7 +916,7 @@ app.post("/voice", async (req, res) => {
 
 app.use((req, res) => {
   console.log(JSON.stringify({ level: "info", type: "not_found", requestId: req.requestId, method: req.method, path: req.path }));
-  return res.status(404).json({ error: "Not Found" });
+  return res.status(404).json({ ok: false, error: "Not Found", requestId: req.requestId });
 });
 
 app.use((err, req, res, next) => {
