@@ -38,6 +38,27 @@ const app = express();
 app.set("trust proxy", 1);
 
 app.use((req, res, next) => {
+  if (process.env.NODE_ENV !== "production") return next();
+
+  const hasProto = !!req.headers["x-forwarded-proto"];
+  const hasHost =
+    !!req.headers["x-forwarded-host"] || !!req.headers["host"];
+
+  if (!hasProto || !hasHost) {
+    const requestId =
+      req.requestId || res.locals?.requestId || null;
+
+    return res.status(403).json({
+      ok: false,
+      error: "FORBIDDEN",
+      requestId
+    });
+  }
+
+  return next();
+});
+
+app.use((req, res, next) => {
   const incoming = req.get("x-request-id") || req.get("x-correlation-id") || null;
   const requestId = incoming || (typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
