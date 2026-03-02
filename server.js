@@ -19,6 +19,7 @@ import { runRetriesOnce } from "./src/retries/runRetriesOnce.js";
 import { isOutsideBusinessHours } from "./src/emergency/businessHours.js";
 import { sendAutoSmsToCaller, sendEmergencyNotify } from "./src/sms/sendSms.js";
 import { verifyTwilioSignature } from "./src/twilio/verifyTwilioSignature.js";
+import { getClientIp } from "./src/security/clientIp.js";
 
 import {
   makeOAuthClient,
@@ -134,7 +135,8 @@ function createInMemoryRateLimiter({ windowMs, max }) {
   return (req, res, next) => {
     const now = Date.now();
     const businessId = extractBusinessIdForRateLimit(req);
-    const key = businessId ? `business:${businessId}` : `ip:${req.ip}`;
+    const clientIp = getClientIp(req);
+    const key = businessId ? `business:${businessId}:ip:${clientIp}` : `ip:${clientIp}`;
 
     const existing = buckets.get(key);
     if (!existing || existing.resetAt <= now) {
@@ -157,7 +159,7 @@ function createInMemoryRateLimiter({ windowMs, max }) {
       key,
       method: req.method,
       path: req.path,
-      ip: req.ip,
+      clientIp,
       limit: max,
       windowMs,
       retryAfterSec,
@@ -1413,6 +1415,16 @@ async function start() {
     console.log("Retry worker enabled");
   } else {
     console.log("Retry worker disabled");
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    console.log(JSON.stringify({
+      level: "info",
+      type: "proxy_identity",
+      requestId: null,
+      trustProxy: app.get("trust proxy"),
+      clientIpSource: "req.ip (Express trusted proxy)",
+    }));
   }
 
   server.listen(PORT, () => {

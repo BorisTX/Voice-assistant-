@@ -1,15 +1,8 @@
 import crypto from "node:crypto";
 
-const warnedMissingApiKey = { value: false };
+import { getClientIp } from "./clientIp.js";
 
-function getClientIp(req) {
-  if (req.ip) return req.ip;
-  const forwardedFor = req.headers?.["x-forwarded-for"];
-  if (forwardedFor) {
-    return String(forwardedFor).split(",")[0].trim();
-  }
-  return "unknown";
-}
+const warnedMissingApiKey = { value: false };
 
 function getBearerToken(value) {
   if (!value) return "";
