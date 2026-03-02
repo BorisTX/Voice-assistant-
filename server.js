@@ -1048,12 +1048,25 @@ app.post("/voice", verifyTwilioSignature, async (req, res) => {
   const businessId = String(req.body?.business_id || process.env.DEFAULT_BUSINESS_ID || "");
   const callerNumber = req.body?.From || "";
   const callStatus = String(req.body?.CallStatus || "started").toLowerCase();
-  const callDecision = decideVoiceCall({
-    callStatus,
-    businessId,
-  });
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
 
   try {
+    const profile = businessId ? await data.getEffectiveBusinessProfile(businessId) : null;
+    const afterHours = businessId && profile
+      ? isOutsideBusinessHours({
+        startUtc: new Date().toISOString(),
+        businessProfile: { timezone: profile.timezone, working_hours_json: JSON.stringify(profile.working_hours) },
+      })
+      : false;
+    const decision = decideVoiceCall({
+      callStatus,
+      businessId,
+      isShuttingDown,
+      isReady,
+      afterHours,
+      afterHoursAutoSmsEnabled: Boolean(profile?.after_hours_auto_sms_enabled),
+    });
+
     if (data) {
       if (businessId) await data.logCallEvent({
         businessId,
@@ -1061,28 +1074,22 @@ app.post("/voice", verifyTwilioSignature, async (req, res) => {
         fromNumber: callerNumber,
         toNumber: req.body?.To || "",
         direction: req.body?.Direction || "inbound",
-        status: callDecision.details.normalizedStatus,
+        status: decision.normalizedStatus,
         durationSec: req.body?.CallDuration ? Number(req.body.CallDuration) : null,
         recordingUrl: req.body?.RecordingUrl || null,
         metaJson: JSON.stringify(req.body || {}),
         requestId: req.requestId,
       });
 
-      switch (callDecision.action) {
-      case "SEND_MISSED_CALL_SMS": {
-        const missedCallProfile = await data.getEffectiveBusinessProfile(businessId);
+      if ((decision.sendMissedCallSms || decision.sendUnavailableSms) && businessId) {
         await sendAutoSmsToCaller({
           to: callerNumber,
           businessId,
           requestId: req.requestId,
-          reason: "missed_call",
-          link: missedCallProfile.booking_link_base,
+          reason: decision.combined ? "failed_call_and_unavailable" : decision.reason,
+          link: profile?.booking_link_base ?? null,
           data,
         });
-        break;
-      }
-      default:
-        break;
       }
     }
   } catch (e) {
@@ -1094,39 +1101,6 @@ app.post("/voice", verifyTwilioSignature, async (req, res) => {
       error: String(e?.message || e),
       msg: "call log error",
     }));
-  }
-
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
-  const profile = businessId && data ? await data.getEffectiveBusinessProfile(businessId) : null;
-  const afterHours = businessId && profile
-    ? isOutsideBusinessHours({
-      startUtc: new Date().toISOString(),
-      businessProfile: { timezone: profile.timezone, working_hours_json: JSON.stringify(profile.working_hours) },
-    })
-    : false;
-  const availabilityDecision = decideVoiceCall({
-    callStatus,
-    businessId,
-    isShuttingDown,
-    isReady,
-    afterHours,
-    afterHoursAutoSmsEnabled: Boolean(profile?.after_hours_auto_sms_enabled),
-  });
-
-  switch (availabilityDecision.action) {
-  case "SEND_UNAVAILABLE_SMS":
-  case "SEND_MISSED_AND_UNAVAILABLE_SMS":
-    await sendAutoSmsToCaller({
-      to: callerNumber,
-      businessId,
-      requestId: req.requestId,
-      reason: availabilityDecision.details.unavailableReason || availabilityDecision.reason,
-      link: profile?.booking_link_base,
-      data,
-    });
-    break;
-  default:
-    break;
   }
 
   const twiml = `

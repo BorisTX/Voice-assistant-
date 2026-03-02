@@ -3,8 +3,8 @@ const FAILED_CALL_STATUSES = new Set(["failed", "busy", "no-answer", "canceled"]
 export function decideVoiceCall(ctx) {
   const callStatus = String(ctx?.callStatus || "started").toLowerCase();
   const hasBusinessId = Boolean(ctx?.businessId);
-  const shouldSendMissedCallSms = FAILED_CALL_STATUSES.has(callStatus) && hasBusinessId;
-  const shouldSendUnavailableSms = Boolean(
+  const sendMissedCallSms = FAILED_CALL_STATUSES.has(callStatus) && hasBusinessId;
+  const sendUnavailableSms = Boolean(
     hasBusinessId
       && ctx?.afterHoursAutoSmsEnabled
       && (ctx?.isShuttingDown || !ctx?.isReady || ctx?.afterHours)
@@ -14,36 +14,22 @@ export function decideVoiceCall(ctx) {
   if (callStatus === "completed") normalizedStatus = "completed";
   if (FAILED_CALL_STATUSES.has(callStatus)) normalizedStatus = "failed";
 
-  if (shouldSendMissedCallSms && shouldSendUnavailableSms) {
-    return {
-      action: "SEND_MISSED_AND_UNAVAILABLE_SMS",
-      reason: "failed_call_and_unavailable",
-      details: {
-        normalizedStatus,
-        unavailableReason: ctx?.isShuttingDown || !ctx?.isReady ? "not_ready" : "after_hours",
-      },
-    };
-  }
+  const unavailableReason = sendUnavailableSms
+    ? (ctx?.isShuttingDown ? "shutting_down" : (!ctx?.isReady ? "not_ready" : "after_hours"))
+    : null;
+  const combined = sendMissedCallSms && sendUnavailableSms;
 
-  if (shouldSendMissedCallSms) {
-    return {
-      action: "SEND_MISSED_CALL_SMS",
-      reason: "failed_call",
-      details: { normalizedStatus },
-    };
-  }
-
-  if (shouldSendUnavailableSms) {
-    return {
-      action: "SEND_UNAVAILABLE_SMS",
-      reason: ctx?.isShuttingDown || !ctx?.isReady ? "not_ready" : "after_hours",
-      details: { normalizedStatus },
-    };
-  }
+  let reason = "no_sms_conditions_met";
+  if (combined) reason = "failed_call_and_unavailable";
+  else if (sendMissedCallSms) reason = "failed_call";
+  else if (sendUnavailableSms) reason = unavailableReason;
 
   return {
-    action: "NO_SMS",
-    reason: "no_sms_conditions_met",
-    details: { normalizedStatus },
+    normalizedStatus,
+    sendMissedCallSms,
+    sendUnavailableSms,
+    unavailableReason,
+    combined,
+    reason,
   };
 }

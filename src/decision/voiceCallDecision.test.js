@@ -3,24 +3,34 @@ import assert from 'node:assert/strict';
 
 import { decideVoiceCall } from './voiceCallDecision.js';
 
-test('normalizes completed status and sends no sms by default', () => {
+test('completed status sends no sms by default', () => {
   const decision = decideVoiceCall({ callStatus: 'completed', businessId: 'biz_1' });
-  assert.equal(decision.action, 'NO_SMS');
-  assert.equal(decision.details.normalizedStatus, 'completed');
+  assert.equal(decision.normalizedStatus, 'completed');
+  assert.equal(decision.sendMissedCallSms, false);
+  assert.equal(decision.sendUnavailableSms, false);
+  assert.equal(decision.unavailableReason, null);
+  assert.equal(decision.combined, false);
 });
 
-test('normalizes failed-like statuses and returns missed call action', () => {
+test('failed-like statuses send missed call sms when business id is present', () => {
   const decision = decideVoiceCall({ callStatus: 'busy', businessId: 'biz_1' });
-  assert.equal(decision.action, 'SEND_MISSED_CALL_SMS');
-  assert.equal(decision.details.normalizedStatus, 'failed');
+  assert.equal(decision.normalizedStatus, 'failed');
+  assert.equal(decision.sendMissedCallSms, true);
+  assert.equal(decision.sendUnavailableSms, false);
+  assert.equal(decision.unavailableReason, null);
+  assert.equal(decision.combined, false);
 });
 
 test('does not send missed call sms when business id is missing', () => {
   const decision = decideVoiceCall({ callStatus: 'failed', businessId: '' });
-  assert.equal(decision.action, 'NO_SMS');
+  assert.equal(decision.normalizedStatus, 'failed');
+  assert.equal(decision.sendMissedCallSms, false);
+  assert.equal(decision.sendUnavailableSms, false);
+  assert.equal(decision.unavailableReason, null);
+  assert.equal(decision.combined, false);
 });
 
-test('returns unavailable sms when not ready and auto sms enabled', () => {
+test('not ready with auto sms enabled sends unavailable sms with reason', () => {
   const decision = decideVoiceCall({
     callStatus: 'started',
     businessId: 'biz_1',
@@ -29,11 +39,14 @@ test('returns unavailable sms when not ready and auto sms enabled', () => {
     afterHours: false,
     afterHoursAutoSmsEnabled: true,
   });
-  assert.equal(decision.action, 'SEND_UNAVAILABLE_SMS');
-  assert.equal(decision.reason, 'not_ready');
+  assert.equal(decision.normalizedStatus, 'started');
+  assert.equal(decision.sendMissedCallSms, false);
+  assert.equal(decision.sendUnavailableSms, true);
+  assert.equal(decision.unavailableReason, 'not_ready');
+  assert.equal(decision.combined, false);
 });
 
-test('returns unavailable sms when after hours and auto sms enabled', () => {
+test('after hours with auto sms enabled sets unavailableReason after_hours', () => {
   const decision = decideVoiceCall({
     callStatus: 'started',
     businessId: 'biz_1',
@@ -42,21 +55,27 @@ test('returns unavailable sms when after hours and auto sms enabled', () => {
     afterHours: true,
     afterHoursAutoSmsEnabled: true,
   });
-  assert.equal(decision.action, 'SEND_UNAVAILABLE_SMS');
-  assert.equal(decision.reason, 'after_hours');
+  assert.equal(decision.normalizedStatus, 'started');
+  assert.equal(decision.sendMissedCallSms, false);
+  assert.equal(decision.sendUnavailableSms, true);
+  assert.equal(decision.unavailableReason, 'after_hours');
+  assert.equal(decision.combined, false);
 });
 
-test('returns combined action when failed and unavailable conditions both match', () => {
+test('combined case sets combined true and both sms booleans true', () => {
   const decision = decideVoiceCall({
     callStatus: 'no-answer',
     businessId: 'biz_1',
-    isReady: true,
-    isShuttingDown: true,
+    isReady: false,
+    isShuttingDown: false,
     afterHours: false,
     afterHoursAutoSmsEnabled: true,
   });
-  assert.equal(decision.action, 'SEND_MISSED_AND_UNAVAILABLE_SMS');
-  assert.equal(decision.details.unavailableReason, 'not_ready');
+  assert.equal(decision.normalizedStatus, 'failed');
+  assert.equal(decision.sendMissedCallSms, true);
+  assert.equal(decision.sendUnavailableSms, true);
+  assert.equal(decision.unavailableReason, 'not_ready');
+  assert.equal(decision.combined, true);
 });
 
 test('does not send unavailable sms when auto sms disabled', () => {
@@ -68,5 +87,9 @@ test('does not send unavailable sms when auto sms disabled', () => {
     afterHours: true,
     afterHoursAutoSmsEnabled: false,
   });
-  assert.equal(decision.action, 'NO_SMS');
+  assert.equal(decision.normalizedStatus, 'started');
+  assert.equal(decision.sendMissedCallSms, false);
+  assert.equal(decision.sendUnavailableSms, false);
+  assert.equal(decision.unavailableReason, null);
+  assert.equal(decision.combined, false);
 });
