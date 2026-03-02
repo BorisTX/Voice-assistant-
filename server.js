@@ -62,15 +62,13 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
-  const isHealthPath = req.path === "/healthz" || req.path === "/readyz";
-  if (isHealthPath) return next();
+  const isBypassPath = req.path === "/" || req.path === "/healthz" || req.path === "/readyz";
+  if (isBypassPath) return next();
   if (process.env.NODE_ENV !== "production") return next();
 
   const hasProto = !!req.headers["x-forwarded-proto"];
-  const hasHost =
-    !!req.headers["x-forwarded-host"] || !!req.headers["host"];
 
-  if (!hasProto || !hasHost) {
+  if (!hasProto) {
     const requestId =
       req.requestId || res.locals?.requestId || null;
 
