@@ -16,6 +16,8 @@ import { openDb, runMigrations } from "./src/db/migrate.js";
 import { makeDataLayer } from "./src/data/index.js";
 import { createBookingFlow } from "./src/bookings/createBooking.js";
 import { runRetriesOnce } from "./src/retries/runRetriesOnce.js";
+import { isOutsideBusinessHours } from "./src/emergency/businessHours.js";
+import { sendAutoSmsToCaller, sendEmergencyNotify } from "./src/sms/sendSms.js";
 
 import {
   makeOAuthClient,
@@ -82,7 +84,8 @@ app.use((req, res, next) => {
 
 app.use((req, res, next) => {
   const isHealthPath = req.path === "/healthz" || req.path === "/readyz";
-  if (isShuttingDown && !isHealthPath) {
+  const isVoicePath = req.path === "/voice";
+  if (isShuttingDown && !isHealthPath && !isVoicePath) {
     return res.status(503).json({ ok: false, error: "SERVER_SHUTTING_DOWN", requestId: req.requestId });
   }
   return next();
@@ -234,6 +237,12 @@ function normalizeBusinessProfileForResponse(profile) {
     buffer_min: Number(profile.buffer_min),
     emergency_enabled: Number(profile.emergency_enabled) ? 1 : 0,
     emergency_phone: profile.emergency_phone ?? null,
+    after_hours_auto_sms_enabled: Number(profile.after_hours_auto_sms_enabled) ? 1 : 0,
+    booking_link_base: profile.booking_link_base ?? null,
+    emergency_notify_sms_to: profile.emergency_notify_sms_to ?? null,
+    emergency_notify_call_to: profile.emergency_notify_call_to ?? null,
+    emergency_retries: Number(profile.emergency_retries || 2),
+    emergency_retry_delay_sec: Number(profile.emergency_retry_delay_sec || 30),
     service_area: profile.service_area,
     created_at_utc: profile.created_at_utc || null,
     updated_at_utc: profile.updated_at_utc || null,
@@ -391,6 +400,13 @@ function buildBusinessProfilePatch(body) {
     );
     if (serviceArea) patch.service_area_json = JSON.stringify(serviceArea);
   }
+
+  if (Object.prototype.hasOwnProperty.call(body, "after_hours_auto_sms_enabled")) patch.after_hours_auto_sms_enabled = body.after_hours_auto_sms_enabled ? 1 : 0;
+  if (Object.prototype.hasOwnProperty.call(body, "booking_link_base")) patch.booking_link_base = body.booking_link_base == null ? null : String(body.booking_link_base).trim();
+  if (Object.prototype.hasOwnProperty.call(body, "emergency_notify_sms_to")) patch.emergency_notify_sms_to = body.emergency_notify_sms_to == null ? null : String(body.emergency_notify_sms_to).trim();
+  if (Object.prototype.hasOwnProperty.call(body, "emergency_notify_call_to")) patch.emergency_notify_call_to = body.emergency_notify_call_to == null ? null : String(body.emergency_notify_call_to).trim();
+  if (Object.prototype.hasOwnProperty.call(body, "emergency_retries")) patch.emergency_retries = Number(body.emergency_retries || 2);
+  if (Object.prototype.hasOwnProperty.call(body, "emergency_retry_delay_sec")) patch.emergency_retry_delay_sec = Number(body.emergency_retry_delay_sec || 30);
 
   return { patch, details };
 }
@@ -829,7 +845,7 @@ app.get("/api/available-slots", availableSlotsRateLimit, async (req, res) => {
       busyMergedUtc,
     });
 
-    return res.json({
+    const responsePayload = {
       ok: true,
       businessId,
       timezone: tz,
@@ -838,7 +854,23 @@ app.get("/api/available-slots", availableSlotsRateLimit, async (req, res) => {
       durationMin: dur,
       count: slots.length,
       slots,
-    });
+    };
+
+    if (slots.length === 0) {
+      const callerPhone = req.query.phone ? String(req.query.phone) : null;
+      if (callerPhone) {
+        await sendAutoSmsToCaller({
+          to: callerPhone,
+          businessId,
+          requestId,
+          reason: "no_slots",
+          link: profile.booking_link_base,
+          data,
+        });
+      }
+    }
+
+    return res.json(responsePayload);
   } catch (e) {
     console.error(JSON.stringify({
       level: "error",
@@ -901,6 +933,34 @@ app.post("/api/book", bookRateLimit, async (req, res) => {
     const status_code = result.status;
     const bookingId = result.body?.bookingId || null;
     console.log(JSON.stringify({ level: "info", route, requestId, status_code, duration_ms, businessId, bookingId }));
+
+    if (result.status >= 400) {
+      const callerPhone = req.body?.phone || req.body?.customer?.phone || null;
+      if (callerPhone && businessId) {
+        const profile = await data.getEffectiveBusinessProfile(String(businessId));
+        await sendAutoSmsToCaller({
+          to: callerPhone,
+          businessId: String(businessId),
+          requestId,
+          reason: "booking_error",
+          link: profile.booking_link_base,
+          data,
+        });
+      }
+    }
+
+    const isEmergency = req.body?.emergency === true || req.body?.isEmergency === true || req.body?.is_emergency === true;
+    if (isEmergency && businessId) {
+      const profile = await data.getEffectiveBusinessProfile(String(businessId));
+      await sendEmergencyNotify({
+        callerNumber: req.body?.phone || req.body?.customer?.phone || null,
+        business: profile,
+        businessId: String(businessId),
+        requestId,
+        data,
+      });
+    }
+
     return res.status(result.status).json(result.body);
   } catch (error) {
     const duration_ms = Math.round(nowMs() - t0);
@@ -914,6 +974,22 @@ app.post("/api/book", bookRateLimit, async (req, res) => {
       bookingId: null,
       error: String(error?.message || error),
     }));
+
+    const callerPhone = req.body?.phone || req.body?.customer?.phone || null;
+    if (callerPhone && businessId) {
+      try {
+        const profile = await data.getEffectiveBusinessProfile(String(businessId));
+        await sendAutoSmsToCaller({
+          to: callerPhone,
+          businessId: String(businessId),
+          requestId,
+          reason: "booking_exception",
+          link: profile.booking_link_base,
+          data,
+        });
+      } catch {}
+    }
+
     return res.status(500).json({ ok: false, error: "Internal error" });
   }
 });
@@ -929,6 +1005,9 @@ app.get("/voice", (req, res) => {
 app.post("/voice", async (req, res) => {
   console.log("POST /voice from Twilio");
 
+  const businessId = String(req.body?.business_id || process.env.DEFAULT_BUSINESS_ID || "");
+  const callerNumber = req.body?.From || "";
+
   try {
     if (data) {
       const callStatus = String(req.body?.CallStatus || "started").toLowerCase();
@@ -936,18 +1015,30 @@ app.post("/voice", async (req, res) => {
       if (["completed"].includes(callStatus)) normalizedStatus = "completed";
       if (["failed", "busy", "no-answer", "canceled"].includes(callStatus)) normalizedStatus = "failed";
 
-      const businessId = String(req.body?.business_id || process.env.DEFAULT_BUSINESS_ID || "");
       if (businessId) await data.logCallEvent({
         businessId,
         callSid: req.body?.CallSid || null,
-        fromNumber: req.body?.From || "",
+        fromNumber: callerNumber,
         toNumber: req.body?.To || "",
         direction: req.body?.Direction || "inbound",
         status: normalizedStatus,
         durationSec: req.body?.CallDuration ? Number(req.body.CallDuration) : null,
         recordingUrl: req.body?.RecordingUrl || null,
         metaJson: JSON.stringify(req.body || {}),
+        requestId: req.requestId,
       });
+
+      if (["failed", "busy", "no-answer", "canceled"].includes(callStatus)) {
+        const profile = await data.getEffectiveBusinessProfile(businessId);
+        await sendAutoSmsToCaller({
+          to: callerNumber,
+          businessId,
+          requestId: req.requestId,
+          reason: "missed_call",
+          link: profile.booking_link_base,
+          data,
+        });
+      }
     }
   } catch (e) {
     console.error(JSON.stringify({
@@ -961,6 +1052,24 @@ app.post("/voice", async (req, res) => {
   }
 
   const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const profile = businessId && data ? await data.getEffectiveBusinessProfile(businessId) : null;
+  const afterHours = businessId && profile
+    ? isOutsideBusinessHours({
+      startUtc: new Date().toISOString(),
+      businessProfile: { timezone: profile.timezone, working_hours_json: JSON.stringify(profile.working_hours) },
+    })
+    : false;
+
+  if ((isShuttingDown || !isReady || afterHours) && businessId && profile?.after_hours_auto_sms_enabled) {
+    await sendAutoSmsToCaller({
+      to: callerNumber,
+      businessId,
+      requestId: req.requestId,
+      reason: isShuttingDown || !isReady ? "not_ready" : "after_hours",
+      link: profile.booking_link_base,
+      data,
+    });
+  }
 
   const twiml = `
 <Response>
